@@ -264,7 +264,7 @@ void opensrc(char *fn) {
 
 enum token next() {
     char *t = tokbuf;
-    char *opchr = "!%&$*+-/:<=>?@~`^|";
+    char *opchr = "!$%&*+-./:<=>?@^|~";
 
     if (peeked) return peeked = false, token;
 
@@ -597,10 +597,13 @@ Expr *xform(Expr *e, varenv *vars) {
 
     case EUN:       return Expr(EUN, e->pos, .op=e->op, .rhs=xform(e->rhs, vars));
 
-    case ESEQ:
+    case ESEQ:      x = xform(e->lhs, vars);
+                    y = xform(e->rhs, vars);
+                    return Expr(ESEQ, e->pos, .lhs=x, .rhs=y);
+
     case EBIN:      x = xform(e->lhs, vars);
                     y = xform(e->rhs, vars);
-                    return Expr(e->form, e->pos, .lhs=x, .op=e->op, .rhs=y);
+                    return Expr(EBIN, e->pos, .lhs=x, .op=e->op, .rhs=y);
 
     case EAPP:      tmp = xform_app(e);
                     if (tmp->form == EAPP) {
@@ -608,7 +611,7 @@ Expr *xform(Expr *e, varenv *vars) {
                         y = xform(e->rhs, vars);
                         return app(x, y);
                     } else
-                        return xform(e, vars);
+                        return xform(tmp, vars);
 
     case EIF:       tmp = xform(e->cond, vars);
                     x = xform(e->yes, vars);
@@ -823,6 +826,8 @@ value eval(Expr *e, values *vars) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, 0, _IONBF, 0);
+
     for (char **i = tokens; *i; i++) *i = intern(*i, -1)->s;
     for (char **i = ops; *i; i++) *i = intern(*i, -1)->s;
 
@@ -837,21 +842,38 @@ int main(int argc, char **argv) {
         opvals[i] = fn(inner, 0);
     }
 
+    addinfix(9, 9, (char*[]){".",0});
     addinfix(6, 7, (char*[]){"+","-","*","/","rem",0});
     addinfix(5, 6, (char*[]){"@",0});
     addinfix(5, 5, (char*[]){":",0});
     addinfix(4, 5, (char*[]){"==","<>","<",">","<=",">=",0});
+    addinfix(1, 1, (char*[]){"$",0});
 
     for (argv++; *argv; argv++) {
         opensrc(*argv);
 
+        struct part {Pos pos; bool rec; struct rule *defs;};
+        struct part *parts = 0;
+        int         n = 0;
+
         while (!peek(TEOF)) {
-            Expr *e = expr();
-            // pr("# %e\n", e);
-            e = xform(e, 0);
-            // pr("# %e\n", e);
-            value x = eval(e, 0);
-            pr("> %v\n", x);
+            Pos pos = srcpos;
+            need(TLET);
+            bool rec = want(TREC);
+            struct rule *defs = (want(TAND), letdefs());
+
+            parts = realloc(parts, (++n) * sizeof *parts);
+            parts[n - 1] = (struct part) {pos, rec, defs};
         }
+
+        Expr *e = lit(no, unit);
+        for (struct part *p = parts + n; p-- > parts; )
+            e = Expr(ELET, p->pos, .rec=p->rec, .defs=p->defs, .in=e);
+
+        // pr("# %e\n", e);
+        e = xform(e, 0);
+        // pr("# %e\n", e);
+        eval(e, 0);
+        pr("done.\n");
     }
 }
