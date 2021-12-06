@@ -11,6 +11,20 @@ typedef struct {int n; char *s;} String;
 typedef struct {char *fn; int ln;} Pos;
 struct infix {char *id; int lhs, rhs; struct infix *next;};
 
+typedef struct value {
+    enum {BOOLE,INT,STRING,TUPLE,LIST,FN} type;
+    union {
+        int     i;
+        String  *s;
+        struct tuple *tup;
+        struct lst *lst;
+        struct fn {struct expr *e; struct values *vars;} *fn;
+    };
+} value;
+struct lst {value hd, tl;};
+struct tuple {int n; value xs[];};
+typedef struct values {value x; struct values *next;} values;
+
 enum token {
     TEOF,TINT,TSTRING,TLP,TRP,TLB,TRB,TCOMMA,TSEMI,TID,TEQUAL,
     TIF,TTHEN,TELSE,TCASE,TBAR,TARROW,TLET,TREC,TAND,TIN,TFN,
@@ -34,20 +48,7 @@ char *ops[] = {
     "",
     "==","<>","<",">","<=",">=",":","+","-","*","/","rem","@","@*",0
 };
-
-typedef struct value {
-    enum {BOOLE,INT,STRING,TUPLE,LIST,FN} type;
-    union {
-        int     i;
-        String  *s;
-        struct tuple *tup;
-        struct lst *lst;
-        struct fn {struct expr *e; struct values *vars;} *fn;
-    };
-} value;
-struct lst {value hd, tl;};
-struct tuple {int n; value xs[];};
-typedef struct values {value x; struct values *next;} values;
+value opvals[OTOTAL];
 
 typedef struct expr Expr;
 struct expr {
@@ -318,20 +319,20 @@ Expr *binary(Expr *lhs, enum op op, Expr *rhs) {
 Expr *unary(enum op op, Expr *rhs) {
     return Expr(EUN, rhs->pos, .rhs=rhs, .op=op);
 }
-Expr *var(Pos pos, char *id) {
-    return Expr(EID, pos, .id=intern(id, -1)->s, .index=-1);
+Expr *var(Pos pos, char *id, int index) {
+    return Expr(EID, pos, .id=intern(id, -1)->s, .index=index);
 }
 Expr *uniquevar(Pos pos) {
     static int count;
     char buf[16];
     sprintf(buf, "__%d", ++count);
-    return var(pos, buf);
+    return var(pos, buf, -1);
 }
 Expr *_if(Expr *cond, Expr *yes, Expr *no) {
     return Expr(EIF, cond->pos, .cond=cond, .yes=yes, .no=no);
 }
 Expr *let(Pos pos, char *id, Expr *x, Expr *in) {
-    struct rule *defs = new(struct rule, .lhs=var(pos, id), .rhs=x, .next=0);
+    struct rule *defs = new(struct rule, .lhs=var(pos, id,-1), .rhs=x, .next=0);
     return Expr(ELET, pos, .rec=false, .defs=defs, .in=in);
 }
 bool istrivial(Expr *e) {
@@ -366,7 +367,7 @@ Expr *aexpr(bool required) {
     if (want(TSTRING))  return lit(pos, string(toktxt));
     if (want(TTRUE))    return lit(pos, boole(true));
     if (want(TFALSE))   return lit(pos, boole(false));
-    if (want(TID))      return var(pos, toktxt->s);
+    if (want(TID))      return var(pos, toktxt->s, -1);
     if (want(TLP) || want(TLB)) {
         enum token end = token == TLP? TRP: TRB;
         int n = 0;
@@ -401,10 +402,7 @@ Expr *iexpr(int level) {
     while ((op = findinfix()) && op->lhs == level) { // Binary operator
         next();
         Expr *rhs = iexpr(op->rhs);
-        int i;
-        for (i = 0; ops[i] && ops[i] != op->id; i++); // Find operator
-        lhs = ops[i] ? binary(lhs, i, rhs)
-                     : app(app(var(lhs->pos, op->id), lhs), rhs);
+        lhs = app(app(var(lhs->pos, op->id, -1), lhs), rhs);
     }
     return lhs;
 }
@@ -471,8 +469,31 @@ varenv *find(char *id, varenv *vars, int *index) {
     return 0;
 }
 
+int findop(char *id) {
+    for (int i = 0; ops[i]; i++) if (ops[i] == id) return i;
+    return -1;
+}
+
+Expr *xform_app(Expr *e) {
+    // Try to directly apply unary.
+    if (e->lhs->form == EID) {
+        int i = findop(e->lhs->id);
+        if (i >= 0 && i < OBINARY)
+            return unary(i, e->rhs);
+    }
+
+    // Try to directly apply binary.
+    if (e->lhs->form == EAPP && e->lhs->lhs->form == EID) {
+        int i = findop(e->lhs->lhs->id);
+        if (i >= 0 && i > OBINARY)
+            return binary(e->lhs->rhs, i, e->rhs);
+    }
+
+    return e;
+}
+
 Expr *xform_pat(Expr *e, Expr *x, Expr *yes, Expr *no) {
-    Expr *q;
+    Expr *tmp;
 
     switch (e->form) {
 
@@ -486,16 +507,20 @@ Expr *xform_pat(Expr *e, Expr *x, Expr *yes, Expr *no) {
                         Expr *ie = binary(x, OTIDX, lit(x->pos, integer(i)));
                         yes = xform_pat(e->es[i], ie, yes, no);
                     }
-                    q = binary(unary(OTLEN, x), OEQ, lit(e->pos, integer(e->n)));
-                    yes = _if(q, yes, no);
+                    tmp = binary(unary(OTLEN, x),
+                                 OEQ,
+                                 lit(e->pos, integer(e->n)));
+                    yes = _if(tmp, yes, no);
                     return _if(unary(OISTUP, x), yes, no);
 
     case ELIST:    for (int i = e->n; i-- > 0; ) {
                         Expr *ie = binary(x, OIDX, lit(x->pos, integer(i)));
                         yes = xform_pat(e->es[i], ie, yes, no);
                     }
-                    q = binary(unary(OLEN, x), OEQ, lit(e->pos, integer(e->n)));
-                    yes = _if(q, yes, no);
+                    tmp = binary(unary(OLEN, x),
+                                 OEQ,
+                                 lit(e->pos, integer(e->n)));
+                    yes = _if(tmp, yes, no);
                     return _if(unary(OISCONS, x), yes, no);
 
     case EBIN:      if (e->op == OCONS) {
@@ -504,6 +529,10 @@ Expr *xform_pat(Expr *e, Expr *x, Expr *yes, Expr *no) {
                         return _if(unary(OISCONS, x), yes, no);
                     }
                     goto bad;
+
+    case EAPP:      tmp = xform_app(e);
+                    if (tmp->form == EAPP) goto bad;
+                    return xform_pat(tmp, x, yes, no);
 
     default:        bad: return semantic(e, "illegal pattern");
     }
@@ -518,17 +547,27 @@ Expr *xform_defs(struct rule *r, Expr *yes, Expr *no) {
 }
 
 Expr *xform(Expr *e, varenv *vars) {
-    varenv *v;
-    int index;
+    varenv  *v;
+    Expr    *tmp;
+    int     index;
 
     switch (e->form) {
     case ELIT:      return e;
 
-    case EID:       if ((v = find(e->id, vars, &index)) == 0)
-                        return semantic(e, "undefined symbol");
-                    // Create new expression since this one could be shared
-                    // (e.g. a temp created for a case expression)
-                    return Expr(EID, e->pos, .id=e->id, .index=index);
+    case EID:       // Find de Bruijn index for variable.
+                    if ((v = find(e->id, vars, &index))) {
+                        // Create new reference with correct index.
+                        // DO NOT UPDATE, EVAR objects can be shared.
+                        // (e.g. a temp created for a case expression)
+                        return var(e->pos, e->id, index);
+                    }
+
+                    // Reverence static primitive, if so
+                    if ((index = findop(e->id)) >= 0)
+                        return lit(e->pos, opvals[index]);
+
+                    // Otherwise, the variable is undefined.
+                    return semantic(e, "undefined symbol");
 
     case ETUPLE:
     case ELIST:     for (int i = 0; i < e->n; i++)
@@ -557,15 +596,13 @@ Expr *xform(Expr *e, varenv *vars) {
                     e->rhs = xform(e->rhs, vars);
                     return e;
 
-    case EAPP:      if (e->lhs->form == EID) // Try to find unary operator.
-                        for (char **i = ops; *i; i++)
-                            if (e->lhs->id == *i) {
-                                e->rhs = xform(e->rhs, vars);
-                                return unary(i - ops, e->rhs);
-                            }
-                    e->lhs = xform(e->lhs, vars);
-                    e->rhs = xform(e->rhs, vars);
-                    return e;
+    case EAPP:      tmp = xform_app(e);
+                    if (tmp->form == EAPP) {
+                        e->lhs = xform(e->lhs, vars);
+                        e->rhs = xform(e->rhs, vars);
+                        return e;
+                    } else
+                        return xform(e, vars);
 
     case EIF:       e->cond = xform(e->cond, vars);
                     e->yes = xform(e->yes, vars);
@@ -779,7 +816,18 @@ int main(int argc, char **argv) {
     for (char **i = tokens; *i; i++) *i = intern(*i, -1)->s;
     for (char **i = ops; *i; i++) *i = intern(*i, -1)->s;
 
-    addinfix(6, 7, (char*[]){"+","-",0});
+    Pos no = {"(builtin)", 0};
+    char *p1 = intern("x", -1)->s;
+    char *p2 = intern("y", -1)->s;
+    for (int i = 0; i < OBINARY; i++)
+        opvals[i] = fn(unary(i, var(no, p1, 0)), 0);
+    for (int i = OBINARY + 1; ops[i]; i++) {
+        Expr *body = binary(var(no, p1, 1), i, var(no, p2, 0));
+        Expr *inner = Expr(EFN, no, .lhs=var(no, p1, -1), .rhs=body);
+        opvals[i] = fn(inner, 0);
+    }
+
+    addinfix(6, 7, (char*[]){"+","-","*","/","rem",0});
     addinfix(5, 6, (char*[]){"@",0});
     addinfix(5, 5, (char*[]){":",0});
     addinfix(4, 5, (char*[]){"==","<>","<",">","<=",">=",0});

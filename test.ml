@@ -1,8 +1,10 @@
-let pr x = print x; print "\n"; x in
+# let pr x = print x; print "\n"; x in
+
+let flip f x y = f y x in
 
 let rec
 foldl f x xs =
   case xs
   | x':xs' -> foldl f (f x x') xs'
   | []     -> x
-in foldl (fn x y -> y:x) [] [1,2,3]
+in foldl (flip (:)) [] [1,2,3]
