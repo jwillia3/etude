@@ -11,7 +11,7 @@ typedef struct {int n; char *s;} String;
 typedef struct {char *fn; int ln;} Pos;
 struct infix {char *id; int lhs, rhs; struct infix *next;};
 
-typedef const struct _expr Expr;
+typedef const struct _ast ast;
 
 typedef struct value {
     enum {BOOLE,INT,STRING,TUPLE,LIST,FN} type;
@@ -20,7 +20,7 @@ typedef struct value {
         String  *s;
         struct tuple *tup;
         struct lst *lst;
-        struct fn { Expr *e; struct values *vars;} *fn;
+        struct fn { ast *e; struct values *vars;} *fn;
     };
 } value;
 struct lst {value hd, tl;};
@@ -52,7 +52,7 @@ char *ops[] = {
 };
 value opvals[OTOTAL];
 
-struct _expr {
+struct _ast {
     enum {
         ELIT,EID,ETUPLE,ELIST,EFN,EAPP,EBIN,EUN,EIF,ECASE,ELET,
         ESEQ,ECRASH
@@ -61,15 +61,15 @@ struct _expr {
     union {
         value x;
         struct {char *id; int index;};
-        struct {int n; Expr **es;};
-        struct {Expr *lhs, *rhs; enum op op;};
-        struct {Expr *cond, *yes, *no;};
-        struct {Expr *sub; struct rule *cases;};
-        struct {bool rec; struct rule *defs; Expr *in;};
-        Expr *crash;
+        struct {int n; ast **es;};
+        struct {ast *lhs, *rhs; enum op op;};
+        struct {ast *cond, *yes, *no;};
+        struct {ast *sub; struct rule *cases;};
+        struct {bool rec; struct rule *defs; ast *in;};
+        ast *crash;
     };
 };
-struct rule {Expr *lhs, *rhs; struct rule *next;};
+struct rule {ast *lhs, *rhs; struct rule *next;};
 
 typedef struct varenv {char *id; struct varenv *next;} varenv;
 
@@ -87,9 +87,9 @@ struct infix    *infixes;
 const value     nil = {LIST, .lst=0};
 const value     unit = {TUPLE, .tup=&(struct tuple) {0}};
 
-#define Expr(f,p,...) new(struct _expr, .form=(f), .pos=(p), __VA_ARGS__)
-Expr *expr();
-Expr *aexpr(bool required);
+#define ast(f,p,...) new(struct _ast, .form=(f), .pos=(p), __VA_ARGS__)
+ast *expr();
+ast *aexpr(bool required);
 void pr(char *msg, ...);
 
 String *intern(char *txt, int n) {
@@ -131,7 +131,7 @@ value newtuple(int n) {
 value cons(value hd, value tl) {
     return (value) {LIST, .lst=new(struct lst, hd, tl)};
 }
-value fn(Expr *e, values *vars) {
+value fn(ast *e, values *vars) {
     return (value) {FN, .fn=new(struct fn, e, vars)};
 }
 
@@ -156,7 +156,7 @@ bool equal(value x, value y) {
 }
 
 
-void printexpr(Expr *e) {
+void printexpr(ast *e) {
     switch (e->form) {
     case ELIT:      pr("%v", e->x); break;
     case EID:       pr("%s", e->id); break;
@@ -223,7 +223,7 @@ void vpr(char *msg, va_list ap) {
         case 'c': putchar(va_arg(ap, int)); break;
         case 'd': printf("%d", va_arg(ap, int)); break;
         case 's': printf("%s", va_arg(ap, char *)); break;
-        case 'e': printexpr(va_arg(ap, Expr *)); break;
+        case 'e': printexpr(va_arg(ap, ast *)); break;
         case 'v': printvalue(va_arg(ap, value), true); break;
         case 'V': printvalue(va_arg(ap, value), false); break;
         case '!': putchar('\n'); exit(1); break;
@@ -245,7 +245,7 @@ void syntax(char *msg, ...) {
         srcpos.fn, srcpos.ln, msg, &ap, tokens[token]);
 }
 
-void *semantic(Expr *e, char *msg, ...) {
+void *semantic(ast *e, char *msg, ...) {
     va_list ap; va_start(ap, msg);
     pr("ml: error %s:%d: %*\nexpr: %e%!", e->pos.fn, e->pos.ln, msg, &ap, e);
     return 0;
@@ -311,32 +311,32 @@ void need(enum token t) { if (!want(t)) syntax("need %s", tokens[t]); }
 
 */
 
-Expr *crash(Expr *e) { return Expr(ECRASH, e->pos, .crash=e); }
-Expr *lit(Pos pos, value x) { return Expr(ELIT, pos, .x=x); }
-Expr *app(Expr *f, Expr *x) { return Expr(EAPP, f->pos, .lhs=f, .rhs=x); }
-Expr *binary(Expr *lhs, enum op op, Expr *rhs) {
-    return Expr(EBIN, lhs->pos, .lhs=lhs, .rhs=rhs, .op=op);
+ast *crash(ast *e) { return ast(ECRASH, e->pos, .crash=e); }
+ast *lit(Pos pos, value x) { return ast(ELIT, pos, .x=x); }
+ast *app(ast *f, ast *x) { return ast(EAPP, f->pos, .lhs=f, .rhs=x); }
+ast *binary(ast *lhs, enum op op, ast *rhs) {
+    return ast(EBIN, lhs->pos, .lhs=lhs, .rhs=rhs, .op=op);
 }
-Expr *unary(enum op op, Expr *rhs) {
-    return Expr(EUN, rhs->pos, .rhs=rhs, .op=op);
+ast *unary(enum op op, ast *rhs) {
+    return ast(EUN, rhs->pos, .rhs=rhs, .op=op);
 }
-Expr *var(Pos pos, char *id, int index) {
-    return Expr(EID, pos, .id=intern(id, -1)->s, .index=index);
+ast *var(Pos pos, char *id, int index) {
+    return ast(EID, pos, .id=intern(id, -1)->s, .index=index);
 }
-Expr *uniquevar(Pos pos) {
+ast *uniquevar(Pos pos) {
     static int count;
     char buf[16];
     sprintf(buf, "__%d", ++count);
     return var(pos, buf, -1);
 }
-Expr *_if(Expr *cond, Expr *yes, Expr *no) {
-    return Expr(EIF, cond->pos, .cond=cond, .yes=yes, .no=no);
+ast *_if(ast *cond, ast *yes, ast *no) {
+    return ast(EIF, cond->pos, .cond=cond, .yes=yes, .no=no);
 }
-Expr *let(Pos pos, char *id, Expr *x, Expr *in) {
+ast *let(Pos pos, char *id, ast *x, ast *in) {
     struct rule *defs = new(struct rule, .lhs=var(pos, id,-1), .rhs=x, .next=0);
-    return Expr(ELET, pos, .rec=false, .defs=defs, .in=in);
+    return ast(ELET, pos, .rec=false, .defs=defs, .in=in);
 }
-bool istrivial(Expr *e) {
+bool istrivial(ast *e) {
     switch (e->form) {
     case ELIT: case EID: case ETUPLE: case ELIST: case EFN:
         return true;
@@ -354,14 +354,14 @@ struct infix *findinfix() {
     return 0;
 }
 
-Expr *funexpr(enum token separator) {
+ast *funexpr(enum token separator) {
     if (want(separator)) return expr();
-    Expr *lhs = aexpr(true);
-    Expr *rhs = funexpr(separator);
-    return Expr(EFN, lhs->pos, .lhs=lhs, .rhs=rhs);
+    ast *lhs = aexpr(true);
+    ast *rhs = funexpr(separator);
+    return ast(EFN, lhs->pos, .lhs=lhs, .rhs=rhs);
 }
 
-Expr *aexpr(bool required) {
+ast *aexpr(bool required) {
     Pos pos = srcpos;
     if (!required && findinfix()) return 0; // Avoid eating operator as an arg.
     if (want(TINT))     return lit(pos, integer(tokint));
@@ -372,7 +372,7 @@ Expr *aexpr(bool required) {
     if (want(TLP) || want(TLB)) {
         enum token end = token == TLP? TRP: TRB;
         int n = 0;
-        Expr **es = 0;
+        ast **es = 0;
         do {
             if (peek(end)) break;
             es = realloc(es, (n + 1) * sizeof *es);
@@ -382,27 +382,27 @@ Expr *aexpr(bool required) {
 
         if (n == 0) return lit(pos, end == TRP? unit: nil);
         if (end == TRP && n == 1) return es[0];
-        return Expr(end == TRP? ETUPLE: ELIST, pos, .n=n, .es=es);
+        return ast(end == TRP? ETUPLE: ELIST, pos, .n=n, .es=es);
     }
     if (want(TFN)) return funexpr(TARROW);
     if (required) syntax("need expression");
     return 0;
 }
 
-Expr *iexpr(int level) {
+ast *iexpr(int level) {
     if (level == 11) {
-        Expr *lhs = aexpr(true);
-        Expr *rhs;
+        ast *lhs = aexpr(true);
+        ast *rhs;
         while ((rhs = aexpr(false))) // Function application
             lhs = app(lhs, rhs);
         return lhs;
     }
 
-    Expr *lhs = iexpr(level + 1);
+    ast *lhs = iexpr(level + 1);
     struct infix *op;
     while ((op = findinfix()) && op->lhs == level) { // Binary operator
         next();
-        Expr *rhs = iexpr(op->rhs);
+        ast *rhs = iexpr(op->rhs);
         lhs = app(app(var(lhs->pos, op->id, -1), lhs), rhs);
     }
     return lhs;
@@ -410,44 +410,44 @@ Expr *iexpr(int level) {
 
 struct rule *caserules() {
     if (!want(TBAR)) return 0;
-    Expr *lhs = expr();
-    Expr *rhs = (want(TARROW), expr());
+    ast *lhs = expr();
+    ast *rhs = (want(TARROW), expr());
     struct rule *next = caserules();
     return new(struct rule, lhs, rhs, next);
 }
 
 struct rule *letdefs() {
-    Expr *lhs = aexpr(true);
-    Expr *rhs = funexpr(TEQUAL);
+    ast *lhs = aexpr(true);
+    ast *rhs = funexpr(TEQUAL);
     struct rule *next = want(TAND)? letdefs(): 0;
     return new(struct rule, lhs, rhs, next);
 }
 
-Expr *cexpr() {
+ast *cexpr() {
     Pos pos = srcpos;
     if (want(TIF)) {
-        Expr *cond = expr();
-        Expr *yes = (need(TTHEN), expr());
-        Expr *no = (need(TELSE), expr());
+        ast *cond = expr();
+        ast *yes = (need(TTHEN), expr());
+        ast *no = (need(TELSE), expr());
         return _if(cond, yes, no);
     }
     if (want(TCASE)) {
-        Expr *sub = expr();
+        ast *sub = expr();
         struct rule *rules = caserules();
-        return Expr(ECASE, sub->pos, .sub=sub, .cases=rules);
+        return ast(ECASE, sub->pos, .sub=sub, .cases=rules);
     }
     if (want(TLET)) {
         bool rec = want(TREC);
         struct rule *defs = (want(TAND), letdefs());
-        Expr *in = (need(TIN), expr());
-        return Expr(ELET, pos, .rec=rec, .defs=defs, .in=in);
+        ast *in = (need(TIN), expr());
+        return ast(ELET, pos, .rec=rec, .defs=defs, .in=in);
     }
     return iexpr(0);
 }
 
-Expr *expr() {
-    Expr *e = cexpr();
-    return want(TSEMI)? Expr(ESEQ, e->pos, .lhs=e, .rhs=expr()): e;
+ast *expr() {
+    ast *e = cexpr();
+    return want(TSEMI)? ast(ESEQ, e->pos, .lhs=e, .rhs=expr()): e;
 }
 
 
@@ -457,7 +457,7 @@ Expr *expr() {
     - Check semantics (variables defined, form correct)
     - Simplify expressions
     - Index variables
-    - Avoid modifying existing Expr; create new ones
+    - Avoid modifying existing ast; create new ones
     - Only xform() should call itself after other functions
       have been called to modify substructures
 
@@ -475,7 +475,7 @@ int findop(char *id) {
     return -1;
 }
 
-Expr *xform_app(Expr *e) {
+ast *xform_app(ast *e) {
     // Try to directly apply unary.
     if (e->lhs->form == EID) {
         int i = findop(e->lhs->id);
@@ -493,8 +493,8 @@ Expr *xform_app(Expr *e) {
     return e;
 }
 
-Expr *xform_pat(Expr *e, Expr *x, Expr *yes, Expr *no) {
-    Expr *tmp;
+ast *xform_pat(ast *e, ast *x, ast *yes, ast *no) {
+    ast *tmp;
 
     switch (e->form) {
 
@@ -505,7 +505,7 @@ Expr *xform_pat(Expr *e, Expr *x, Expr *yes, Expr *no) {
                              : let(e->pos, e->id, x, yes);
 
     case ETUPLE:    for (int i = e->n; i-- > 0; ) {
-                        Expr *ie = binary(x, OTIDX, lit(x->pos, integer(i)));
+                        ast *ie = binary(x, OTIDX, lit(x->pos, integer(i)));
                         yes = xform_pat(e->es[i], ie, yes, no);
                     }
                     tmp = binary(unary(OTLEN, x),
@@ -515,7 +515,7 @@ Expr *xform_pat(Expr *e, Expr *x, Expr *yes, Expr *no) {
                     return _if(unary(OISTUP, x), yes, no);
 
     case ELIST:    for (int i = e->n; i-- > 0; ) {
-                        Expr *ie = binary(x, OIDX, lit(x->pos, integer(i)));
+                        ast *ie = binary(x, OIDX, lit(x->pos, integer(i)));
                         yes = xform_pat(e->es[i], ie, yes, no);
                     }
                     tmp = binary(unary(OLEN, x),
@@ -539,11 +539,11 @@ Expr *xform_pat(Expr *e, Expr *x, Expr *yes, Expr *no) {
     }
 }
 
-Expr *xform_cases(Expr *x, struct rule *r, Expr *no) {
+ast *xform_cases(ast *x, struct rule *r, ast *no) {
     return r? xform_pat(r->lhs, x, r->rhs, xform_cases(x, r->next, no)): no;
 }
 
-Expr *xform_defs(struct rule *r, Expr *yes, Expr *no) {
+ast *xform_defs(struct rule *r, ast *yes, ast *no) {
     return r? xform_pat(r->lhs, r->rhs, xform_defs(r->next, yes, no), no): yes;
 }
 
@@ -551,9 +551,9 @@ struct rule *copyrules(struct rule *r) {
     return r? new(struct rule, r->lhs, r->rhs, copyrules(r->next)): 0;
 }
 
-Expr *xform(Expr *e, varenv *vars) {
+ast *xform(ast *e, varenv *vars) {
     varenv  *v;
-    Expr    *tmp, *x, *y, **es;
+    ast    *tmp, *x, *y, **es;
     int     index;
 
     switch (e->form) {
@@ -578,32 +578,32 @@ Expr *xform(Expr *e, varenv *vars) {
     case ELIST:     es = (void*) calloc(e->n, sizeof *es);
                     for (int i = 0; i < e->n; i++)
                         es[i] = xform(e->es[i], vars);
-                    return Expr(e->form, e->pos, .n=e->n, .es=es);
+                    return ast(e->form, e->pos, .n=e->n, .es=es);
 
     case EFN:       // Simple one-variable function.
                     // Check r.h.s. with parameter added to variables.
                     if (e->lhs->form == EID) {
                         tmp = xform(e->rhs, new(varenv, e->lhs->id, vars));
-                        return Expr(EFN, e->pos, .lhs=e->lhs, .rhs=tmp);
+                        return ast(EFN, e->pos, .lhs=e->lhs, .rhs=tmp);
                     }
 
                     // Otherwise, introduce named parameter and xform pattern.
                     else {
-                        Expr *uid = uniquevar(e->lhs->pos);
-                        Expr *body = xform_pat(e->lhs, uid, e->rhs, crash(e));
-                        e = Expr(EFN, e->pos, .lhs=uid, .rhs=body);
+                        ast *uid = uniquevar(e->lhs->pos);
+                        ast *body = xform_pat(e->lhs, uid, e->rhs, crash(e));
+                        e = ast(EFN, e->pos, .lhs=uid, .rhs=body);
                         return xform(e, vars);
                     }
 
-    case EUN:       return Expr(EUN, e->pos, .op=e->op, .rhs=xform(e->rhs, vars));
+    case EUN:       return ast(EUN, e->pos, .op=e->op, .rhs=xform(e->rhs, vars));
 
     case ESEQ:      x = xform(e->lhs, vars);
                     y = xform(e->rhs, vars);
-                    return Expr(ESEQ, e->pos, .lhs=x, .rhs=y);
+                    return ast(ESEQ, e->pos, .lhs=x, .rhs=y);
 
     case EBIN:      x = xform(e->lhs, vars);
                     y = xform(e->rhs, vars);
-                    return Expr(EBIN, e->pos, .lhs=x, .op=e->op, .rhs=y);
+                    return ast(EBIN, e->pos, .lhs=x, .op=e->op, .rhs=y);
 
     case EAPP:      tmp = xform_app(e);
                     if (tmp->form == EAPP) {
@@ -623,9 +623,9 @@ Expr *xform(Expr *e, varenv *vars) {
                         return xform(x, vars);
                     } else {
                         // Create a temporary to hold the subject value.
-                        Expr *sub = uniquevar(e->sub->pos);
-                        Expr *in = xform_cases(sub, e->cases, crash(e));
-                        Expr *out = let(sub->pos, sub->id, e->sub, in);
+                        ast *sub = uniquevar(e->sub->pos);
+                        ast *in = xform_cases(sub, e->cases, crash(e));
+                        ast *out = let(sub->pos, sub->id, e->sub, in);
                         return xform(out, vars);
                     }
 
@@ -647,7 +647,7 @@ Expr *xform(Expr *e, varenv *vars) {
                             i->rhs = xform(i->rhs, vars);
 
                         tmp = xform(e->in, vars);
-                        return Expr(ELET, e->pos, .rec=1, .defs=defs, .in=tmp);
+                        return ast(ELET, e->pos, .rec=1, .defs=defs, .in=tmp);
                     }
                     // Single variable let definition (`let x = ... in ...`).
                     // Every non-recursive let will end up in this form.
@@ -656,7 +656,7 @@ Expr *xform(Expr *e, varenv *vars) {
                         struct rule *defs = copyrules(e->defs);
                         defs->rhs = xform(defs->rhs, vars);
                         tmp = xform(e->in, newvars);
-                        return Expr(ELET, e->pos, .rec=0, .defs=defs, .in=tmp);
+                        return ast(ELET, e->pos, .rec=0, .defs=defs, .in=tmp);
                     }
                     // Break down multiple and/or pattern defs into singles.
                     // Reprocess once broken down.
@@ -675,7 +675,7 @@ void addinfix(int lhs, int rhs, char **ids) {
         infixes = new(struct infix, intern(*i, -1)->s, lhs, rhs, infixes);
 }
 
-value eval_op(Expr *e, value x, value y) {
+value eval_op(ast *e, value x, value y) {
     int n;
     value i;
 
@@ -754,7 +754,7 @@ value eval_op(Expr *e, value x, value y) {
     }
 }
 
-value eval(Expr *e, values *vars) {
+value eval(ast *e, values *vars) {
     value   x, y, *ptr;
 
     top:
@@ -837,8 +837,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < OBINARY; i++)
         opvals[i] = fn(unary(i, var(no, p1, 0)), 0);
     for (int i = OBINARY + 1; ops[i]; i++) {
-        Expr *body = binary(var(no, p1, 1), i, var(no, p2, 0));
-        Expr *inner = Expr(EFN, no, .lhs=var(no, p1, -1), .rhs=body);
+        ast *body = binary(var(no, p1, 1), i, var(no, p2, 0));
+        ast *inner = ast(EFN, no, .lhs=var(no, p1, -1), .rhs=body);
         opvals[i] = fn(inner, 0);
     }
 
@@ -866,9 +866,9 @@ int main(int argc, char **argv) {
             parts[n - 1] = (struct part) {pos, rec, defs};
         }
 
-        Expr *e = lit(no, unit);
+        ast *e = lit(no, unit);
         for (struct part *p = parts + n; p-- > parts; )
-            e = Expr(ELET, p->pos, .rec=p->rec, .defs=p->defs, .in=e);
+            e = ast(ELET, p->pos, .rec=p->rec, .defs=p->defs, .in=e);
 
         // pr("# %e\n", e);
         e = xform(e, 0);
