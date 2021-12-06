@@ -11,6 +11,8 @@ typedef struct {int n; char *s;} String;
 typedef struct {char *fn; int ln;} Pos;
 struct infix {char *id; int lhs, rhs; struct infix *next;};
 
+typedef const struct _expr Expr;
+
 typedef struct value {
     enum {BOOLE,INT,STRING,TUPLE,LIST,FN} type;
     union {
@@ -18,7 +20,7 @@ typedef struct value {
         String  *s;
         struct tuple *tup;
         struct lst *lst;
-        struct fn {struct expr *e; struct values *vars;} *fn;
+        struct fn { Expr *e; struct values *vars;} *fn;
     };
 } value;
 struct lst {value hd, tl;};
@@ -50,8 +52,7 @@ char *ops[] = {
 };
 value opvals[OTOTAL];
 
-typedef struct expr Expr;
-struct expr {
+struct _expr {
     enum {
         ELIT,EID,ETUPLE,ELIST,EFN,EAPP,EBIN,EUN,EIF,ECASE,ELET,
         ESEQ,ECRASH
@@ -86,7 +87,7 @@ struct infix    *infixes;
 const value     nil = {LIST, .lst=0};
 const value     unit = {TUPLE, .tup=&(struct tuple) {0}};
 
-#define Expr(f,p,...) new(Expr, .form=(f), .pos=(p), __VA_ARGS__)
+#define Expr(f,p,...) new(struct _expr, .form=(f), .pos=(p), __VA_ARGS__)
 Expr *expr();
 Expr *aexpr(bool required);
 void pr(char *msg, ...);
@@ -574,7 +575,7 @@ Expr *xform(Expr *e, varenv *vars) {
                     return semantic(e, "undefined symbol");
 
     case ETUPLE:
-    case ELIST:     es = calloc(e->n, sizeof *es);
+    case ELIST:     es = (void*) calloc(e->n, sizeof *es);
                     for (int i = 0; i < e->n; i++)
                         es[i] = xform(e->es[i], vars);
                     return Expr(e->form, e->pos, .n=e->n, .es=es);
