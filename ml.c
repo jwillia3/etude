@@ -1,3 +1,9 @@
+#ifdef GC
+#include <gc.h>
+#define malloc GC_malloc
+#define realloc GC_realloc
+#endif
+
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -9,12 +15,13 @@
 
 typedef struct {int n; char s[];} String;
 typedef struct {char *fn; int ln;} Pos;
+struct part {Pos pos; bool rec; struct rule *defs;};
 struct infix {char *id; int lhs, rhs; struct infix *next;};
 
 typedef const struct _ast ast;
 
 typedef struct value {
-    enum {BOOLE,INT,STRING,TUPLE,LIST,FN} type;
+    enum {BOOLE,CHAR,INT,STRING,TUPLE,LIST,FN} type;
     union {
         int     i;
         String  *s;
@@ -28,28 +35,30 @@ struct tuple {int n; value xs[];};
 typedef struct values {value x; struct values *next;} values;
 
 enum token {
-    TEOF,TINT,TSTRING,TLP,TRP,TLB,TRB,TCOMMA,TSEMI,TID,TEQUAL,
+    TEOF,TINT,TCHAR,TSTRING,TLP,TRP,TLB,TRB,TCOMMA,TSEMI,TID,TEQUAL,
     TIF,TTHEN,TELSE,TCASE,TBAR,TARROW,TLET,TREC,TAND,TIN,TFN,
     TTRUE,TFALSE
 };
 char *tokens[] = {
-    "end of file","int","string","(",")","[","]",",",";","id",
+    "end of file","int","char","string","(",")","[","]",",",";","id",
     "=","if","then","else","case","|","->","let","rec","and",
     "in","fn","true","false",0
 };
 enum op {
     OISBOOL,OISINT,OISSTR,OISCONS,OISLIST,OISTUP,OISFN,
-    OLEN,OTLEN,OHD,OTL,OPRINT,
+    OSLEN,OCHR,OORD,OLEN,OTLEN,OHD,OTL,OPRINT,OREADFILE,
     OBINARY,
     OEQ,ONE,OLT,OGT,OLE,OGE,OCONS,OCAT,OADD,OSUB,OMUL,ODIV,OREM,
-    OIDX,OTIDX,
+    OIDX,OTIDX,OCHARAT,
     OTOTAL
 };
 char *ops[] = {
-    "isbool","isint","isstring","iscons","islist","istuple","isfn",
-    "length","tuplelength","hd","tl","print",
+    "isbool","isint","isstring","iscons","islist","istuple",
+    "isfn","strlen","chr","ord","length","tuplelength","hd",
+    "tl","print","readfile",
     "",
-    "==","<>","<",">","<=",">=",":","^","+","-","*","/","rem","@","@*",0
+    "==","<>","<",">","<=",">=",":","^","+","-","*","/","rem",
+    "@","@*","char_at",0
 };
 value opvals[OTOTAL];
 
@@ -85,6 +94,9 @@ String          **interns;
 int             ninterns;
 Pos             srcpos;
 struct infix    *infixes;
+struct part     *parts = 0;
+int             nparts = 0;
+value           chars[256];
 const value     nil = {LIST, .lst=0};
 const value     unit = {TUPLE, .tup=&(struct tuple) {0}};
 
@@ -93,6 +105,15 @@ ast *expr();
 ast *aexpr(bool required);
 void pr(char *msg, ...);
 
+String *newstring(char *txt, int n) {
+    if (n < 0) n = strlen(txt);
+
+    String *str = malloc(sizeof *str + n + 1);
+    memcpy(str->s, txt, n);
+    str->s[n] = 0;
+    str->n = n;
+    return str;
+}
 String *intern(char *txt, int n) {
     if (n < 0) n = strlen(txt);
 
@@ -100,14 +121,8 @@ String *intern(char *txt, int n) {
         if (interns[i]->n == n && !memcmp(interns[i]->s, txt, n))
             return interns[i];
 
-    String *str = malloc(sizeof *str + n + 1);
-    memcpy(str->s, txt, n);
-    str->s[n] = 0;
-    str->n = n;
-
     interns = realloc(interns, (ninterns + 1) * sizeof *interns);
-    interns[ninterns] = str;
-    return interns[ninterns++];
+    return interns[ninterns++] = newstring(txt, n);
 }
 
 /*
@@ -119,12 +134,14 @@ bool isnil(value x) { return x.type == LIST && !x.lst; }
 bool iscons(value x) { return x.type == LIST && x.lst; }
 bool isbool(value x) { return x.type == BOOLE; }
 bool isint(value x) { return x.type == INT; }
+bool ischar(value x) { return x.type == CHAR; }
 bool isstring(value x) { return x.type == STRING; }
 bool islist(value x) { return x.type == LIST; }
 bool istuple(value x) { return x.type == TUPLE; }
 bool isfn(value x) { return x.type == FN; }
 value boole(bool x) { return (value) {BOOLE, .i=x}; }
 value integer(int i) { return (value) {INT, .i=i}; }
+value character(int i) { return (value) {CHAR, .i=i}; }
 value string(String *s) { return (value) {STRING, .s=s}; }
 value newtuple(int n) {
     struct tuple *tup = malloc(sizeof *tup + n * sizeof *tup->xs);
@@ -150,6 +167,7 @@ bool equal(value x, value y) {
 
     switch (x.type) {
     case BOOLE:     return x.i == y.i;
+    case CHAR:      return x.i == y.i;
     case INT:       return x.i == y.i;
     case STRING:    return x.s == y.s ||
                         x.s->n == y.s->n && !memcmp(x.s->s, y.s->s, x.s->n);
@@ -164,7 +182,6 @@ bool equal(value x, value y) {
     }
     return false;
 }
-
 
 void printexpr(ast *e) {
     switch (e->form) {
@@ -199,14 +216,11 @@ void printexpr(ast *e) {
 void printvalue(value x, bool decorate) {
     switch (x.type) {
     case BOOLE:     pr(x.i? "true": "false"); break;
+    case CHAR:      pr(decorate? "'%C'": "%c", x.i); break;
     case INT:       pr("%d", x.i); break;
     case STRING:    if (decorate) {
                         pr("\"");
-                        for (int i = 0; i < x.s->n; i++)
-                            if (x.s->s[i] == '\n') pr("\\n");
-                            else if (x.s->s[i] == '\t') pr("\\t");
-                            else if (x.s->s[i] == '\"') pr("\\\"");
-                            else pr("%c", x.s->s[i]);
+                        for (int i = 0; i < x.s->n; i++) pr("%C", x.s->s[i]);
                         pr("\"");
                     } else pr("%s", x.s->s);
                     break;
@@ -226,10 +240,16 @@ void printvalue(value x, bool decorate) {
 }
 
 void vpr(char *msg, va_list ap) {
-    char *msg2;
+    char c, *msg2;
     for (char *s = msg; *s; s++)
         if (*s != '%') putchar(*s);
         else switch (*++s) {
+        case 'C': c = va_arg(ap, int);
+                  if (c == '\n') printf("\\n");
+                  else if (c == '\t') printf("\\t");
+                  else if (c == '\"') printf("\\\"");
+                  else putchar(c);
+                  break;
         case 'c': putchar(va_arg(ap, int)); break;
         case 'd': printf("%d", va_arg(ap, int)); break;
         case 's': printf("%s", va_arg(ap, char *)); break;
@@ -272,6 +292,16 @@ void opensrc(char *fn) {
     fclose(file);
 }
 
+int esc() {
+    if (*src == '\\')
+        switch (*++src) {
+        case 'n':   return '\n'; break;
+        case 't':   return '\t'; break;
+        default:    return *src;
+        }
+    return *src;
+}
+
 enum token next() {
     char *t = tokbuf;
     char *opchr = "!$%&*+-./:<=>?@^|~";
@@ -288,18 +318,20 @@ enum token next() {
         if (*src == tokens[i][0]) return src++, token = i;
     if (isdigit(src[*src == '-']))
         return tokint = strtol(src, &src, 10), token = TINT;
+    if (*src == '\'') {
+        src++;
+        tokint = esc();
+        if (*++src != '\'') syntax("unclosed character");
+        return src++, token = TCHAR;
+    }
     if (*src == '"')
         for (src++; ; src++)
             if (!*src || *src == '\n') syntax("unclosed string");
             else if (*src == '"') {
                 src++;
                 return toktxt = intern(tokbuf, t - tokbuf), token = TSTRING;
-            } else if (*src != '\\') *t++ = *src;
-            else switch (*++src) {
-            case 'n': *t++ = '\n'; break;
-            case 't': *t++ = '\t'; break;
-            default: *t++ = *src;
-            }
+            } else
+                *t++ = esc();
 
     while (isalnum(*src) || *src == '_' || *src == '\'') *t++ = *src++;
     if (t == tokbuf) while (*src && strchr(opchr, *src)) *t++ = *src++;
@@ -375,6 +407,7 @@ ast *aexpr(bool required) {
     Pos pos = srcpos;
     if (!required && findinfix()) return 0; // Avoid eating operator as an arg.
     if (want(TINT))     return lit(pos, integer(tokint));
+    if (want(TCHAR))    return lit(pos, character(tokint));
     if (want(TSTRING))  return lit(pos, string(toktxt));
     if (want(TTRUE))    return lit(pos, boole(true));
     if (want(TFALSE))   return lit(pos, boole(false));
@@ -463,6 +496,18 @@ ast *cexpr() {
 ast *expr() {
     ast *e = cexpr();
     return want(TSEMI)? ast(ESEQ, e->pos, .lhs=e, .rhs=expr()): e;
+}
+
+void readscript() {
+    while (!peek(TEOF)) {
+        Pos pos = srcpos;
+        need(TLET);
+        bool rec = want(TREC);
+        struct rule *defs = (want(TAND), letdefs());
+
+        parts = realloc(parts, (++nparts) * sizeof *parts);
+        parts[nparts - 1] = (struct part) {pos, rec, defs};
+    }
 }
 
 
@@ -696,27 +741,6 @@ value eval_op(ast *e, value x, value y) {
 
     switch (e->op) {
 
-    case OLEN:
-        if (!islist(x)) semantic(e, "NOT_LIST %v", x);
-        for (n = 0; !isnil(x); x = x.lst->tl) n++;
-        return integer(n);
-
-    case OTLEN:
-        if (!istuple(x)) semantic(e, "NOT_TUPLE %v", x);
-        return integer(x.tup->n);
-
-    case OHD:
-        if (!iscons(x)) semantic(e, "HD_NOT_LIST %v", x);
-        return x.lst->hd;
-
-    case OTL:
-        if (!iscons(x)) semantic(e, "TL_NOT_LIST %v", x);
-        return x.lst->tl;
-
-    case OPRINT:
-        pr("%V", x);
-        return x;
-
     case OISBOOL:   return boole(isbool(x));
     case OISINT:    return boole(isint(x));
     case OISSTR:    return boole(isstring(x));
@@ -724,6 +748,44 @@ value eval_op(ast *e, value x, value y) {
     case OISLIST:   return boole(islist(x));
     case OISTUP:    return boole(istuple(x));
     case OISFN:     return boole(isfn(x));
+
+    case OSLEN:     if (!isstring(x)) semantic(e, "NON_STRING_ORD %v", x);
+                    return integer(x.s->n);
+
+    case OCHR:      if (!isint(x)) semantic(e, "NON_INTEGER_CHR %v", x);
+                    return character(x.i);
+
+    case OORD:      if (!ischar(x)) semantic(e, "NON_CHAR_ORD %v", x);
+                    return integer(x.i);
+
+    case OLEN:      if (!islist(x)) semantic(e, "NOT_LIST %v", x);
+                    for (n = 0; !isnil(x); x = x.lst->tl) n++;
+                    return integer(n);
+
+    case OTLEN:     if (!istuple(x)) semantic(e, "NOT_TUPLE %v", x);
+                    return integer(x.tup->n);
+
+    case OHD:       if (!iscons(x)) semantic(e, "HD_NOT_LIST %v", x);
+                    return x.lst->hd;
+
+    case OTL:       if (!iscons(x)) semantic(e, "TL_NOT_LIST %v", x);
+                    return x.lst->tl;
+
+    case OPRINT:    pr("%V", x);
+                    return x;
+
+    case OREADFILE: {
+                        if (!isstring(x)) semantic(e, "NOT_STRING %v", x);
+                        FILE *file = fopen(x.s->s, "rb");
+                        if (!file) return unit;
+                        fseek(file, 0, SEEK_END);
+                        int len = ftell(file);
+                        rewind(file);
+                        char *buf = malloc(len);
+                        fread(buf, 1, len, file);
+                        fclose(file);
+                        return string(newstring(buf, len));
+                    }
 
     case OCONS:
         if (!islist(y)) semantic(e, "NON_LIST_TAIL %v", y);
@@ -745,6 +807,12 @@ value eval_op(ast *e, value x, value y) {
         if (!isint(y)) semantic(e, "NON_INTEGER_INDEX %v", y);
         if (y.i < 0 || y.i >= x.tup->n) semantic(e, "BOUNDS %v @* %v", x, y);
         return x.tup->xs[y.i];
+
+    case OCHARAT:
+        if (!isstring(x)) semantic(e, "NON_STRING_BASE %v", x);
+        if (!isint(y)) semantic(e, "NON_INTEGER_INDEX %v", y);
+        if (y.i < 0 || y.i >= x.s->n) semantic(e, "BOUNDS (char_at %v %v)", x, y);
+        return chars[(int) x.s->s[y.i] & 255];
 
     case OEQ:       return boole(equal(x, y));
     case ONE:       return boole(!equal(x, y));
@@ -849,6 +917,7 @@ int main(int argc, char **argv) {
 
     for (char **i = tokens; *i; i++) *i = intern(*i, -1)->s;
     for (char **i = ops; *i; i++) *i = intern(*i, -1)->s;
+    for (int i = 0; i < 256; i++) chars[i] = string(intern((char[]){i,0}, 1));
 
     Pos no = {"(builtin)", 0};
     char *p1 = intern("x", -1)->s;
@@ -870,24 +939,16 @@ int main(int argc, char **argv) {
     addinfix(1, 1, (char*[]){"$",0});
 
     for (argv++; *argv; argv++) {
+        nparts = 0;
+
+        opensrc("prelude.ml");
+        readscript();
+
         opensrc(*argv);
-
-        struct part {Pos pos; bool rec; struct rule *defs;};
-        struct part *parts = 0;
-        int         n = 0;
-
-        while (!peek(TEOF)) {
-            Pos pos = srcpos;
-            need(TLET);
-            bool rec = want(TREC);
-            struct rule *defs = (want(TAND), letdefs());
-
-            parts = realloc(parts, (++n) * sizeof *parts);
-            parts[n - 1] = (struct part) {pos, rec, defs};
-        }
+        readscript();
 
         ast *e = lit(no, unit);
-        for (struct part *p = parts + n; p-- > parts; )
+        for (struct part *p = parts + nparts; p-- > parts; )
             e = ast(ELET, p->pos, .rec=p->rec, .defs=p->defs, .in=e);
 
         // pr("# %e\n", e);

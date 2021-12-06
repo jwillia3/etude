@@ -2,7 +2,7 @@
 Grammar
 -------
 ```
-top:    'let' ['rec'] decls
+top:    ('let' ['rec'] decls)...
 decls:  decls "and" decls
         id aexpr... '=' expr
         aexpr '=' expr
