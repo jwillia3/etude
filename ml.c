@@ -546,9 +546,13 @@ Expr *xform_defs(struct rule *r, Expr *yes, Expr *no) {
     return r? xform_pat(r->lhs, r->rhs, xform_defs(r->next, yes, no), no): yes;
 }
 
+struct rule *copyrules(struct rule *r) {
+    return r? new(struct rule, r->lhs, r->rhs, copyrules(r->next)): 0;
+}
+
 Expr *xform(Expr *e, varenv *vars) {
     varenv  *v;
-    Expr    *tmp;
+    Expr    *tmp, *x, *y, **es;
     int     index;
 
     switch (e->form) {
@@ -570,16 +574,18 @@ Expr *xform(Expr *e, varenv *vars) {
                     return semantic(e, "undefined symbol");
 
     case ETUPLE:
-    case ELIST:     for (int i = 0; i < e->n; i++)
-                        e->es[i] = xform(e->es[i], vars);
-                    return e;
+    case ELIST:     es = calloc(e->n, sizeof *es);
+                    for (int i = 0; i < e->n; i++)
+                        es[i] = xform(e->es[i], vars);
+                    return Expr(e->form, e->pos, .n=e->n, .es=es);
 
     case EFN:       // Simple one-variable function.
                     // Check r.h.s. with parameter added to variables.
                     if (e->lhs->form == EID) {
-                        e->rhs = xform(e->rhs, new(varenv, e->lhs->id, vars));
-                        return e;
+                        tmp = xform(e->rhs, new(varenv, e->lhs->id, vars));
+                        return Expr(EFN, e->pos, .lhs=e->lhs, .rhs=tmp);
                     }
+
                     // Otherwise, introduce named parameter and xform pattern.
                     else {
                         Expr *uid = uniquevar(e->lhs->pos);
@@ -588,30 +594,29 @@ Expr *xform(Expr *e, varenv *vars) {
                         return xform(e, vars);
                     }
 
-    case EUN:       e->rhs = xform(e->rhs, vars);
-                    return e;
+    case EUN:       return Expr(EUN, e->pos, .op=e->op, .rhs=xform(e->rhs, vars));
 
     case ESEQ:
-    case EBIN:      e->lhs = xform(e->lhs, vars);
-                    e->rhs = xform(e->rhs, vars);
-                    return e;
+    case EBIN:      x = xform(e->lhs, vars);
+                    y = xform(e->rhs, vars);
+                    return Expr(e->form, e->pos, .lhs=x, .op=e->op, .rhs=y);
 
     case EAPP:      tmp = xform_app(e);
                     if (tmp->form == EAPP) {
-                        e->lhs = xform(e->lhs, vars);
-                        e->rhs = xform(e->rhs, vars);
-                        return e;
+                        x = xform(e->lhs, vars);
+                        y = xform(e->rhs, vars);
+                        return app(x, y);
                     } else
                         return xform(e, vars);
 
-    case EIF:       e->cond = xform(e->cond, vars);
-                    e->yes = xform(e->yes, vars);
-                    e->no = xform(e->no, vars);
-                    return e;
+    case EIF:       tmp = xform(e->cond, vars);
+                    x = xform(e->yes, vars);
+                    y = xform(e->no, vars);
+                    return _if(tmp, x, y);
 
     case ECASE:     if (e->sub->form == EID) {
-                        e = xform_cases(e->sub, e->cases, crash(e));
-                        return xform(e, vars);
+                        x = xform_cases(e->sub, e->cases, crash(e));
+                        return xform(x, vars);
                     } else {
                         // Create a temporary to hold the subject value.
                         Expr *sub = uniquevar(e->sub->pos);
@@ -621,9 +626,11 @@ Expr *xform(Expr *e, varenv *vars) {
                     }
 
     case ELET:      if (e->rec) {
+                        struct rule *defs = copyrules(e->defs);
+
                         // Define all functions first.
                         // All definitions will have IDs on the l.h.s.
-                        for (struct rule *i = e->defs; i; i = i->next) {
+                        for (struct rule *i = defs; i; i = i->next) {
                             if (i->lhs->form != EID)
                                 return semantic(i->lhs, "l.h.s. must be var");
                             if (i->rhs->form != EFN)
@@ -631,19 +638,21 @@ Expr *xform(Expr *e, varenv *vars) {
                             vars = new(varenv, i->lhs->id, vars);
                         }
 
-                        for (struct rule *i = e->defs; i; i = i->next)
+                        // Transform copy of rules.
+                        for (struct rule *i = defs; i; i = i->next)
                             i->rhs = xform(i->rhs, vars);
 
-                        e->in = xform(e->in, vars);
-                        return e;
+                        tmp = xform(e->in, vars);
+                        return Expr(ELET, e->pos, .rec=1, .defs=defs, .in=tmp);
                     }
                     // Single variable let definition (`let x = ... in ...`).
                     // Every non-recursive let will end up in this form.
                     else if (!e->defs->next && e->defs->lhs->form == EID) {
                         varenv *newvars = new(varenv, e->defs->lhs->id, vars);
-                        e->defs->rhs = xform(e->defs->rhs, vars);
-                        e->in = xform(e->in, newvars);
-                        return e;
+                        struct rule *defs = copyrules(e->defs);
+                        defs->rhs = xform(defs->rhs, vars);
+                        tmp = xform(e->in, newvars);
+                        return Expr(ELET, e->pos, .rec=0, .defs=defs, .in=tmp);
                     }
                     // Break down multiple and/or pattern defs into singles.
                     // Reprocess once broken down.
