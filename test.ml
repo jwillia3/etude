@@ -11,6 +11,17 @@ let reverse xs = foldl (flip (:)) [] xs
 
 let rec foldr f x xs = foldl (flip f) x (reverse xs)
 
-let map f xs = foldr ((:) . f) [] xs
+let concat xs ys = foldr (:) ys xs
+let append x xs = concat xs [x]
+let flatten xss = foldr (concat) [] xss
 
-let _ = pr $ map (+ 1) [100, 20, 3]
+let map f xs = foldr ((:) . f) [] xs
+let flatmap f xs = flatten (map f xs)
+
+let implode strings = foldr (^) "" strings
+
+# let _ = pr $ flatten [[1,2,3], [4,5], [6]]
+let _ = pr $ (true  || false,
+              true  || true,
+              false || false,
+              false || true)

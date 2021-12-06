@@ -7,7 +7,7 @@
 
 #define new(t,...) memcpy(malloc(sizeof(t)), &(t){__VA_ARGS__}, sizeof(t))
 
-typedef struct {int n; char *s;} String;
+typedef struct {int n; char s[];} String;
 typedef struct {char *fn; int ln;} Pos;
 struct infix {char *id; int lhs, rhs; struct infix *next;};
 
@@ -41,14 +41,15 @@ enum op {
     OISBOOL,OISINT,OISSTR,OISCONS,OISLIST,OISTUP,OISFN,
     OLEN,OTLEN,OHD,OTL,OPRINT,
     OBINARY,
-    OEQ,ONE,OLT,OGT,OLE,OGE,OCONS,OADD,OSUB,OMUL,ODIV,OREM,OIDX,OTIDX,
+    OEQ,ONE,OLT,OGT,OLE,OGE,OCONS,OCAT,OADD,OSUB,OMUL,ODIV,OREM,
+    OIDX,OTIDX,
     OTOTAL
 };
 char *ops[] = {
     "isbool","isint","isstring","iscons","islist","istuple","isfn",
     "length","tuplelength","hd","tl","print",
     "",
-    "==","<>","<",">","<=",">=",":","+","-","*","/","rem","@","@*",0
+    "==","<>","<",">","<=",">=",":","^","+","-","*","/","rem","@","@*",0
 };
 value opvals[OTOTAL];
 
@@ -80,7 +81,7 @@ bool            peeked;
 int             tokint;
 char            tokbuf[sizeof source];
 String          *toktxt;
-String          *interns;
+String          **interns;
 int             ninterns;
 Pos             srcpos;
 struct infix    *infixes;
@@ -95,16 +96,18 @@ void pr(char *msg, ...);
 String *intern(char *txt, int n) {
     if (n < 0) n = strlen(txt);
 
-    for (String *i = interns; i < interns + ninterns; i++)
-        if (i->n == n && !memcmp(i->s, txt, n)) return i;
+    for (int i = 0; i < ninterns; i++)
+        if (interns[i]->n == n && !memcmp(interns[i]->s, txt, n))
+            return interns[i];
 
-    String str = (String) {.n=n, .s=malloc(n + 1)};
-    memcpy(str.s, txt, n);
-    str.s[n] = 0;
+    String *str = malloc(sizeof *str + n + 1);
+    memcpy(str->s, txt, n);
+    str->s[n] = 0;
+    str->n = n;
 
     interns = realloc(interns, (ninterns + 1) * sizeof *interns);
     interns[ninterns] = str;
-    return interns + ninterns++;
+    return interns[ninterns++];
 }
 
 /*
@@ -133,6 +136,13 @@ value cons(value hd, value tl) {
 }
 value fn(ast *e, values *vars) {
     return (value) {FN, .fn=new(struct fn, e, vars)};
+}
+value catenate(String *a, String *b) {
+    String *c = malloc(sizeof *c + a->n + b->n + 1);
+    c->n = a->n + b->n;
+    memcpy(c->s, a->s, a->n);
+    memcpy(c->s + a->n, b->s, b->n);
+    return string(c);
 }
 
 bool equal(value x, value y) {
@@ -403,7 +413,12 @@ ast *iexpr(int level) {
     while ((op = findinfix()) && op->lhs == level) { // Binary operator
         next();
         ast *rhs = iexpr(op->rhs);
-        lhs = app(app(var(lhs->pos, op->id, -1), lhs), rhs);
+        if (!strcmp(op->id, "&&"))
+            lhs = _if(lhs, rhs, lit(rhs->pos, boole(0)));
+        else if (!strcmp(op->id, "||"))
+            lhs = _if(lhs, lit(rhs->pos, boole(1)), rhs);
+        else
+            lhs = app(app(var(lhs->pos, op->id, -1), lhs), rhs);
     }
     return lhs;
 }
@@ -713,6 +728,10 @@ value eval_op(ast *e, value x, value y) {
     case OCONS:
         if (!islist(y)) semantic(e, "NON_LIST_TAIL %v", y);
         return cons(x, y);
+    case OCAT:
+        if (!isstring(x) || !isstring(y))
+            semantic(e, "NON_STRING_CAT %v ^ %v", x, y);
+        return catenate(x.s, y.s);
 
     case OIDX:
         if (!islist(x)) semantic(e, "NON_LIST_BASE %v", x);
@@ -845,8 +864,9 @@ int main(int argc, char **argv) {
     addinfix(9, 9, (char*[]){".",0});
     addinfix(6, 7, (char*[]){"+","-","*","/","rem",0});
     addinfix(5, 6, (char*[]){"@",0});
-    addinfix(5, 5, (char*[]){":",0});
+    addinfix(5, 5, (char*[]){":","^",0});
     addinfix(4, 5, (char*[]){"==","<>","<",">","<=",">=",0});
+    addinfix(3, 3, (char*[]){"&&","||",});
     addinfix(1, 1, (char*[]){"$",0});
 
     for (argv++; *argv; argv++) {
