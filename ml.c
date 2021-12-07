@@ -21,13 +21,14 @@ struct infix {char *id; int lhs, rhs; struct infix *next;};
 typedef const struct _ast ast;
 
 typedef struct value {
-    enum {BOOLE,CHAR,INT,STRING,TUPLE,LIST,FN} type;
+    enum {BOOLE,CHAR,INT,STRING,TUPLE,LIST,REF,FN} type;
     union {
         int     i;
         String  *s;
         struct tuple *tup;
         struct lst *lst;
         struct fn { ast *e; struct values *vars;} *fn;
+        struct value *ref;
     };
 } value;
 struct lst {value hd, tl;};
@@ -37,28 +38,29 @@ typedef struct values {value x; struct values *next;} values;
 enum token {
     TEOF,TINT,TCHAR,TSTRING,TLP,TRP,TLB,TRB,TCOMMA,TSEMI,TID,TEQUAL,
     TIF,TTHEN,TELSE,TCASE,TBAR,TARROW,TLET,TREC,TAND,TIN,TFN,
-    TTRUE,TFALSE
+    TTRUE,TFALSE,TDEREF,
 };
 char *tokens[] = {
     "end of file","int","char","string","(",")","[","]",",",";","id",
     "=","if","then","else","case","|","->","let","rec","and",
-    "in","fn","true","false",0
+    "in","fn","true","false","!",0
 };
 enum op {
     OISBOOL,OISINT,OISSTR,OISCONS,OISLIST,OISTUP,OISFN,
-    OSLEN,OCHR,OORD,OLEN,OTLEN,OHD,OTL,OPRINT,OREADFILE,
+    OSLEN,OCHR,OORD,OIMPL,OLEN,OTLEN,OHD,OTL,OREF,ODEREF,OPRINT,
+    OREADFILE,OEXIT,
     OBINARY,
     OEQ,ONE,OLT,OGT,OLE,OGE,OCONS,OCAT,OADD,OSUB,OMUL,ODIV,OREM,
-    OIDX,OTIDX,OCHARAT,
+    OIDX,OTIDX,OCHARAT,OSET,
     OTOTAL
 };
 char *ops[] = {
     "isbool","isint","isstring","iscons","islist","istuple",
-    "isfn","strlen","chr","ord","length","tuplelength","hd",
-    "tl","print","readfile",
+    "isfn","strlen","chr","ord","implode","length","tuplelength","hd",
+    "tl","ref","!","print","readfile","exit",
     "",
     "==","<>","<",">","<=",">=",":","^","+","-","*","/","rem",
-    "@","@*","char_at",0
+    "@","@*","char_at",":=",0
 };
 value opvals[OTOTAL];
 
@@ -76,7 +78,7 @@ struct _ast {
         struct {ast *cond, *yes, *no;};
         struct {ast *sub; struct rule *cases;};
         struct {bool rec; struct rule *defs; ast *in;};
-        ast *crash;
+        struct {ast *ctx, *offender;};
     };
 };
 struct rule {ast *lhs, *rhs; struct rule *next;};
@@ -96,7 +98,6 @@ Pos             srcpos;
 struct infix    *infixes;
 struct part     *parts = 0;
 int             nparts = 0;
-value           chars[256];
 const value     nil = {LIST, .lst=0};
 const value     unit = {TUPLE, .tup=&(struct tuple) {0}};
 
@@ -138,11 +139,13 @@ bool ischar(value x) { return x.type == CHAR; }
 bool isstring(value x) { return x.type == STRING; }
 bool islist(value x) { return x.type == LIST; }
 bool istuple(value x) { return x.type == TUPLE; }
+bool isref(value x) { return x.type == REF; }
 bool isfn(value x) { return x.type == FN; }
 value boole(bool x) { return (value) {BOOLE, .i=x}; }
 value integer(int i) { return (value) {INT, .i=i}; }
 value character(int i) { return (value) {CHAR, .i=i}; }
 value string(String *s) { return (value) {STRING, .s=s}; }
+value ref(value x) { return (value) {REF, .ref=new(value[1], x)}; }
 value newtuple(int n) {
     struct tuple *tup = malloc(sizeof *tup + n * sizeof *tup->xs);
     tup->n = n;
@@ -178,6 +181,7 @@ bool equal(value x, value y) {
     case LIST:      for ( ; iscons(x) && iscons(y); x=x.lst->tl, y=y.lst->tl)
                         if (!equal(x.lst->hd, y.lst->hd));
                     return isnil(x) && isnil(y);
+    case REF:       return equal(*x.ref, *y.ref);
     case FN:        return x.fn == y.fn;
     }
     return false;
@@ -234,6 +238,7 @@ void printvalue(value x, bool decorate) {
                         pr("%v%s", i.lst->hd, isnil(i.lst->tl)? "": ", ");
                     pr("]");
                     break;
+    case REF:       pr("(ref %v)", *x.ref); break;
     case FN:        pr("#fn"); break;
     }
 
@@ -338,7 +343,7 @@ enum token next() {
     if (t == tokbuf) syntax("not a token: %c", *src);
     toktxt = intern(tokbuf, t - tokbuf);
 
-    for (char **i = tokens; *i; i++)
+    for (char **i = tokens + TID + 1; *i; i++)
         if (*i == toktxt->s) return token = i - tokens;
     return token = TID;
 }
@@ -353,7 +358,6 @@ void need(enum token t) { if (!want(t)) syntax("need %s", tokens[t]); }
 
 */
 
-ast *crash(ast *e) { return ast(ECRASH, e->pos, .crash=e); }
 ast *lit(Pos pos, value x) { return ast(ELIT, pos, .x=x); }
 ast *app(ast *f, ast *x) { return ast(EAPP, f->pos, .lhs=f, .rhs=x); }
 ast *binary(ast *lhs, enum op op, ast *rhs) {
@@ -377,6 +381,9 @@ ast *_if(ast *cond, ast *yes, ast *no) {
 ast *let(Pos pos, char *id, ast *x, ast *in) {
     struct rule *defs = new(struct rule, .lhs=var(pos, id,-1), .rhs=x, .next=0);
     return ast(ELET, pos, .rec=false, .defs=defs, .in=in);
+}
+ast *crash(ast *ctx, ast *offender) {
+    return ast(ECRASH, ctx->pos, .ctx=ctx, .offender=offender);
 }
 bool istrivial(ast *e) {
     switch (e->form) {
@@ -404,8 +411,9 @@ ast *funexpr(enum token separator) {
 }
 
 ast *aexpr(bool required) {
-    Pos pos = srcpos;
+    Pos pos = (peek(0), srcpos);
     if (!required && findinfix()) return 0; // Avoid eating operator as an arg.
+    if (want(TDEREF))   return unary(ODEREF, aexpr(true));
     if (want(TINT))     return lit(pos, integer(tokint));
     if (want(TCHAR))    return lit(pos, character(tokint));
     if (want(TSTRING))  return lit(pos, string(toktxt));
@@ -472,7 +480,7 @@ struct rule *letdefs() {
 }
 
 ast *cexpr() {
-    Pos pos = srcpos;
+    Pos pos = (peek(0), srcpos);
     if (want(TIF)) {
         ast *cond = expr();
         ast *yes = (need(TTHEN), expr());
@@ -603,8 +611,13 @@ ast *xform_cases(ast *x, struct rule *r, ast *no) {
     return r? xform_pat(r->lhs, x, r->rhs, xform_cases(x, r->next, no)): no;
 }
 
-ast *xform_defs(struct rule *r, ast *yes, ast *no) {
-    return r? xform_pat(r->lhs, r->rhs, xform_defs(r->next, yes, no), no): yes;
+ast *xform_defs(ast *ctx, struct rule *r, ast *yes) {
+    if (!r) return yes;
+    ast *no = crash(ctx, r->rhs);
+    if (!istrivial(r->rhs))
+        no = crash(ctx,
+                   lit(r->rhs->pos, string(intern("CANNOT_REIFY_VALUE", -1))));
+    return xform_pat(r->lhs, r->rhs, xform_defs(ctx, r->next, yes), no);
 }
 
 struct rule *copyrules(struct rule *r) {
@@ -650,7 +663,7 @@ ast *xform(ast *e, varenv *vars) {
                     // Otherwise, introduce named parameter and xform pattern.
                     else {
                         ast *uid = uniquevar(e->lhs->pos);
-                        ast *body = xform_pat(e->lhs, uid, e->rhs, crash(e));
+                        ast *body = xform_pat(e->lhs, uid, e->rhs, crash(e, uid));
                         e = ast(EFN, e->pos, .lhs=uid, .rhs=body);
                         return xform(e, vars);
                     }
@@ -679,12 +692,12 @@ ast *xform(ast *e, varenv *vars) {
                     return _if(tmp, x, y);
 
     case ECASE:     if (e->sub->form == EID) {
-                        x = xform_cases(e->sub, e->cases, crash(e));
+                        x = xform_cases(e->sub, e->cases, crash(e, e->sub));
                         return xform(x, vars);
                     } else {
                         // Create a temporary to hold the subject value.
                         ast *sub = uniquevar(e->sub->pos);
-                        ast *in = xform_cases(sub, e->cases, crash(e));
+                        ast *in = xform_cases(sub, e->cases, crash(e, sub));
                         ast *out = let(sub->pos, sub->id, e->sub, in);
                         return xform(out, vars);
                     }
@@ -721,11 +734,13 @@ ast *xform(ast *e, varenv *vars) {
                     // Break down multiple and/or pattern defs into singles.
                     // Reprocess once broken down.
                     else {
-                        e = xform_defs(e->defs, e->in, crash(e));
+                        e = xform_defs(e, e->defs, e->in);
                         return xform(e, vars);
                     }
 
-    case ECRASH:    return e;
+    case ECRASH:    tmp = xform(e->offender, vars);
+                    return ast(ECRASH, e->pos, .ctx=e->ctx, .offender=tmp);
+
     default:        return semantic(e, "UNTRANSFORMED");
     }
 }
@@ -736,8 +751,9 @@ void addinfix(int lhs, int rhs, char **ids) {
 }
 
 value eval_op(ast *e, value x, value y) {
-    int n;
-    value i;
+    int     n;
+    value   i;
+    char    *buf;
 
     switch (e->op) {
 
@@ -758,6 +774,16 @@ value eval_op(ast *e, value x, value y) {
     case OORD:      if (!ischar(x)) semantic(e, "NON_CHAR_ORD %v", x);
                     return integer(x.i);
 
+    case OIMPL:     if (!islist(x))
+                        not_chars: semantic(e, "NOT_CHAR_LIST %v", x);
+                    for (n = 0, i = x; iscons(i); i = i.lst->tl)
+                        if (!ischar(i.lst->hd)) goto not_chars;
+                        else n++;
+                    buf = malloc(n + 1);
+                    for (n = 0, i = x; iscons(i); i = i.lst->tl)
+                        buf[n++] = i.lst->hd.i;
+                    return string(newstring(buf, n));
+
     case OLEN:      if (!islist(x)) semantic(e, "NOT_LIST %v", x);
                     for (n = 0; !isnil(x); x = x.lst->tl) n++;
                     return integer(n);
@@ -771,6 +797,11 @@ value eval_op(ast *e, value x, value y) {
     case OTL:       if (!iscons(x)) semantic(e, "TL_NOT_LIST %v", x);
                     return x.lst->tl;
 
+    case OREF:      return ref(x);
+
+    case ODEREF:    if (!isref(x)) semantic(e, "NOT_REF %v", x);
+                    return *x.ref;
+
     case OPRINT:    pr("%V", x);
                     return x;
 
@@ -781,11 +812,12 @@ value eval_op(ast *e, value x, value y) {
                         fseek(file, 0, SEEK_END);
                         int len = ftell(file);
                         rewind(file);
-                        char *buf = malloc(len);
+                        buf = malloc(len);
                         fread(buf, 1, len, file);
                         fclose(file);
                         return string(newstring(buf, len));
                     }
+    case OEXIT:     exit(isint(x)? x.i: 0);
 
     case OCONS:
         if (!islist(y)) semantic(e, "NON_LIST_TAIL %v", y);
@@ -812,7 +844,12 @@ value eval_op(ast *e, value x, value y) {
         if (!isstring(x)) semantic(e, "NON_STRING_BASE %v", x);
         if (!isint(y)) semantic(e, "NON_INTEGER_INDEX %v", y);
         if (y.i < 0 || y.i >= x.s->n) semantic(e, "BOUNDS (char_at %v %v)", x, y);
-        return chars[(int) x.s->s[y.i] & 255];
+        return character((int) x.s->s[y.i] & 255);
+
+    case OSET:
+        if (!isref(x)) semantic(e, "NON_REF %v", x);
+        *x.ref = y;
+        return x;
 
     case OEQ:       return boole(equal(x, y));
     case ONE:       return boole(!equal(x, y));
@@ -830,7 +867,7 @@ value eval_op(ast *e, value x, value y) {
         case OGE:   return boole(x.i >= y.i);
         case OADD:  return integer(x.i + y.i);
         case OSUB:  return integer(x.i - y.i);
-        case OMUL:  return integer(x.i - y.i);
+        case OMUL:  return integer(x.i * y.i);
         case ODIV:  return integer(x.i / y.i);
         case OREM:  return integer(x.i % y.i);
         default:    return semantic(e, "UNEVALUATED_OP"), unit;
@@ -901,14 +938,16 @@ value eval(ast *e, values *vars) {
                         goto top;
                     }
 
-    case ECRASH:    return semantic(e->crash, "NO_MATCH"), unit;
+    case ECRASH:    x = eval(e->offender, vars);
+                    semantic(e->ctx, "NO_MATCH: %v", x);
+                    return unit;
 
     case ESEQ:      eval(e->lhs, vars);
                     e = e->rhs;
                     goto top;
 
     case ECASE:     // does not exist
-    default:        return semantic(e, "UNEVALUATED"), unit;
+    default:        return semantic(e, "UNEVALUATED (%d)", e->form), unit;
     }
 }
 
@@ -917,7 +956,6 @@ int main(int argc, char **argv) {
 
     for (char **i = tokens; *i; i++) *i = intern(*i, -1)->s;
     for (char **i = ops; *i; i++) *i = intern(*i, -1)->s;
-    for (int i = 0; i < 256; i++) chars[i] = string(intern((char[]){i,0}, 1));
 
     Pos no = {"(builtin)", 0};
     char *p1 = intern("x", -1)->s;
@@ -931,12 +969,15 @@ int main(int argc, char **argv) {
     }
 
     addinfix(9, 9, (char*[]){".",0});
-    addinfix(6, 7, (char*[]){"+","-","*","/","rem",0});
+    addinfix(7, 8, (char*[]){"*","/","rem",0});
+    addinfix(6, 7, (char*[]){"+","-",0});
     addinfix(5, 6, (char*[]){"@",0});
     addinfix(5, 5, (char*[]){":","^",0});
     addinfix(4, 5, (char*[]){"==","<>","<",">","<=",">=",0});
-    addinfix(3, 3, (char*[]){"&&","||",});
-    addinfix(1, 1, (char*[]){"$",0});
+    addinfix(3, 3, (char*[]){"&&",0});
+    addinfix(2, 2, (char*[]){"||",0});
+    addinfix(1, 1, (char*[]){":=",0});
+    addinfix(0, 0, (char*[]){"$",0});
 
     for (argv++; *argv; argv++) {
         nparts = 0;

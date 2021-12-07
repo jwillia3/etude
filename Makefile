@@ -1,5 +1,5 @@
 CFLAGS=-g -Wall -Wno-dangling-else -Wno-parentheses
-GC=-DGC
+#GC=-DGC
 test: ml
 	./ml test.ml
 
