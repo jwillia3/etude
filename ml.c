@@ -52,7 +52,7 @@ typedef struct value {
         String          *s;
         struct tuple    *t;
         struct list     *l;
-        struct fn {ast *e; struct values *vars;} *f;
+        struct fn       *f;
         struct value    *ref;
     };
 } value;
@@ -60,6 +60,8 @@ typedef struct value {
 struct list {value hd, tl;};
 struct tuple {int n; value xs[];};
 typedef struct values {value x; struct values *next;} values;
+struct finfo {char *id; int got;};
+struct fn {ast *e; values *vars; struct finfo *info;};
 
 struct _ast {
     enum {
@@ -71,7 +73,7 @@ struct _ast {
         value x;
         struct {char *id; int index;};
         struct {int n; ast **es;};
-        struct {ast *lhs, *rhs; enum op op;};
+        struct {ast *lhs, *rhs; enum op op; struct finfo *info;};
         struct {ast *cond, *yes, *no;};
         struct {ast *sub; struct rule *cases;};
         struct {bool rec; struct rule *defs; ast *in;};
@@ -148,8 +150,8 @@ value newtuple(int n) {
 value cons(value hd, value tl) {
     return (value) {LIST, .l=new(struct list, hd, tl)};
 }
-value fn(ast *e, values *vars) {
-    return (value) {FN, .f=new(struct fn, e, vars)};
+value fn(ast *e, values *vars, struct finfo *info) {
+    return (value) {FN, .f=new(struct fn, .e=e, .vars=vars, .info=info)};
 }
 value catenate(String *a, String *b) {
     String *c = newstring(0, a->n + b->n);
@@ -232,7 +234,18 @@ void printvalue(value x, bool decorate) {
                     pr("]");
                     break;
     case REF:       pr("(ref %v)", *x.ref); break;
-    case FN:        pr("#fn"); break;
+    case FN:        {
+                        int n = x.f->info->got;
+                        if (n) pr("(");
+                        pr("%s", x.f->info->id? x.f->info->id: "(fn)");
+                        for (int i = 0; i < n; i++) {
+                            values *v = x.f->vars;
+                            for (int j = 0; j < n - i - 1; j++) v = v->next;
+                            pr(" %v", v->x);
+                        }
+                        if (n) pr(")");
+                        break;
+                    }
     }
 
 }
@@ -382,11 +395,12 @@ struct infix *findinfix() {
     return 0;
 }
 
-ast *funexpr(enum token separator) {
+ast *funexpr(enum token separator, char *id, int got) {
     if (want(separator)) return expr();
     ast *lhs = aexpr(true);
-    ast *rhs = funexpr(separator);
-    return ast(EFN, lhs->pos, .lhs=lhs, .rhs=rhs);
+    ast *rhs = funexpr(separator, id, got + 1);
+    struct finfo *info = new(struct finfo, .id=id, .got=got);
+    return ast(EFN, lhs->pos, .lhs=lhs, .rhs=rhs, .info=info);
 }
 
 ast *aexpr(bool required) {
@@ -414,7 +428,7 @@ ast *aexpr(bool required) {
         if (end == TRP && n == 1) return es[0];
         return ast(end == TRP? ETUPLE: ELIST, pos, .n=n, .es=es);
     }
-    if (want(TFN)) return funexpr(TARROW);
+    if (want(TFN)) return funexpr(TARROW, 0, 0);
     if (required) syntax("need expression");
     return 0;
 }
@@ -453,7 +467,7 @@ struct rule *caserules() {
 
 struct rule *letdefs() {
     ast *lhs = aexpr(true);
-    ast *rhs = funexpr(TEQUAL);
+    ast *rhs = funexpr(TEQUAL, lhs->form == EID? lhs->id: 0, 0);
     struct rule *next = want(TAND)? letdefs(): 0;
     return new(struct rule, lhs, rhs, next);
 }
@@ -607,8 +621,8 @@ ast *xform(ast *e, varenv *vars) {
 
     case EID:       // Find de Bruijn index for variable.
                     if ((v = find(e->id, vars, &index))) {
-                        // Create new reference with correct index.
-                        // DO NOT UPDATE, EVAR objects can be shared.
+                        // Create new object with correct index.
+                        // DO NOT UPDATE, EID objects can be shared.
                         // (e.g. a temp created for a case expression)
                         return var(e->pos, e->id, index);
                     }
@@ -630,14 +644,15 @@ ast *xform(ast *e, varenv *vars) {
                     // Check r.h.s. with parameter added to variables.
                     if (e->lhs->form == EID) {
                         tmp = xform(e->rhs, new(varenv, e->lhs->id, vars));
-                        return ast(EFN, e->pos, .lhs=e->lhs, .rhs=tmp);
+                        return ast(EFN, e->pos, .lhs=e->lhs,
+                                   .rhs=tmp, .info=e->info);
                     }
 
                     // Otherwise, introduce named parameter and xform pattern.
                     else {
                         ast *uid = uniquevar(e->lhs->pos);
                         ast *body = xform_pat(e->lhs, uid, e->rhs, crash(e, uid));
-                        e = ast(EFN, e->pos, .lhs=uid, .rhs=body);
+                        e = ast(EFN, e->pos, .lhs=uid, .rhs=body, .info=e->info);
                         return xform(e, vars);
                     }
 
@@ -873,7 +888,7 @@ value eval(ast *e, values *vars) {
                     }
                     return x;
 
-    case EFN:       return fn(e->rhs, vars);
+    case EFN:       return fn(e->rhs, vars, e->info);
 
     case EAPP:      x = eval(e->lhs, vars);
                     if (x.type != FN) semantic(e, "NON_FUNCTION %v", x);
@@ -931,12 +946,18 @@ int main(int argc, char **argv) {
     Pos no = {"(builtin)", 0};
     char *p1 = intern("x", -1)->s;
     char *p2 = intern("y", -1)->s;
-    for (int i = 0; i < OBINARY; i++)
-        opvals[i] = fn(unary(i, var(no, p1, 0)), 0);
+    for (int i = 0; i < OBINARY; i++) {
+        char *id = intern(ops[i], -1)->s;
+        struct finfo *info = new(struct finfo, .id=id, .got=0);
+        opvals[i] = fn(unary(i, var(no, p1, 0)), 0, info);
+    }
     for (int i = OBINARY + 1; ops[i]; i++) {
+        char *id = intern(ops[i], -1)->s;
+        struct finfo *i1 = new(struct finfo, .id=id, .got=0);
+        struct finfo *i2 = new(struct finfo, .id=id, .got=1);
         ast *body = binary(var(no, p1, 1), i, var(no, p2, 0));
-        ast *inner = ast(EFN, no, .lhs=var(no, p1, -1), .rhs=body);
-        opvals[i] = fn(inner, 0);
+        ast *inner = ast(EFN, no, .lhs=var(no, p1, -1), .rhs=body, .info=i2);
+        opvals[i] = fn(inner, 0, i1);
     }
 
     addinfix(9, 9, (char*[]){".",0});
