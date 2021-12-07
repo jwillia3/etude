@@ -635,7 +635,7 @@ ast *xform(ast *e, varenv *vars) {
                     return semantic(e, "undefined symbol");
 
     case ETUPLE:
-    case ELIST:     es = (void*) calloc(e->n, sizeof *es);
+    case ELIST:     es = (void*) malloc(e->n * sizeof *es);
                     for (int i = 0; i < e->n; i++)
                         es[i] = xform(e->es[i], vars);
                     return ast(e->form, e->pos, .n=e->n, .es=es);

@@ -33,17 +33,22 @@ let lex filename src =
       (char_at src i, i + 1)
   in
 
+  # Read a single token from the string index given
+  # Return: (type_string, token_text, next_index)
   let single i =
     let c = char_at src i in
+
     if isdigit c || c == '-' && (isdigit $ char_at src (i + 1)) then
       let j = while isdigit (i + 1) in
       ("INT", substring i j src, j)
+
     else if c == '\'' then
       let (txt, j) = character (i + 1) in
       if char_at src j <> '\'' then
         err j "unclosed char"
       else
-        ("CHAR", txt, j + 2)
+        ("CHAR", txt, j + 1)
+
     else if c == '"' then
       let rec do i out =
         if i == strlen src || char_at src i == '\n' then
@@ -54,17 +59,21 @@ let lex filename src =
           let (c, i') = character i in
           do i' (c:out)
       in do (i + 1) []
+
     else if idchr c then
       let j = while idchr i in
       let id = substring i j src in
       (idtype id, id, j)
+
     else if opchr c then
       let j = while opchr i in
       let id = substring i j src in
       (idtype id, id, j)
+
     else if pun c then
       let txt = substring i (i + 1) src in
       (txt, txt, i + 1)
+
     else
       err i ("bad token: " ^ (char_to_string c))
   in
@@ -79,6 +88,8 @@ let lex filename src =
     else (i, ln)
   in
 
+  # Read all tokens.
+  # Return: [(location, type, text)]
   let rec all i line out =
     let (i, ln) = space i line in
     let loc = filename ^ ":" ^ itoa ln in
@@ -94,6 +105,6 @@ let lex filename src =
 
 let filename = "prelude.ml"
 let src = readfile filename
-let _ =
-        app pr $
-        lex filename src
+let tokens = lex filename src
+let _ = app pr tokens
+
