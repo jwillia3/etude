@@ -1,6 +1,6 @@
 # let source = readfile "prelude.ml"
 
-let lex src =
+let lex filename src =
   # Return the first index that ok is not ture
   let rec while ok i =
     if i < strlen src && ok (char_at src i) then
@@ -14,19 +14,6 @@ let lex src =
     print msg;
     print ".\n";
     exit 1
-  in
-
-  let rec space i =
-    if i < strlen src then
-      let c = char_at src i in
-      if isspace c then
-        space (i + 1)
-      else if c == '#' then
-        space (while (<> '\n') (i + 1))
-      else
-        i
-    else
-      strlen src
   in
 
   let idchr c = isalnum c || c == '_' || c == '\'' in
@@ -82,15 +69,31 @@ let lex src =
       err i ("bad token: " ^ (char_to_string c))
   in
 
-  let rec all i out =
-    let i = space i in
+  let rec space i ln =
+    if i < strlen src then
+      case char_at src i
+      | ' '  -> space (i + 1) ln
+      | '\n' -> space (i + 1) (ln + 1)
+      | '#'  -> space (while (<> '\n') (i + 1)) ln
+      | _    -> (i, ln)
+    else (i, ln)
+  in
+
+  let rec all i line out =
+    let (i, ln) = space i line in
+    let loc = filename ^ ":" ^ itoa ln in
     if i < strlen src then
       let (type, text, j) = single i in
-      all j ((type, text):out)
+      let token = (loc, type, text) in
+      all j ln (token:out)
     else
       reverse out
   in
 
-  all 0 []
+  all 0 1 []
 
-let _ = app pr $ lex (readfile "prelude.ml")
+let filename = "prelude.ml"
+let src = readfile filename
+let _ =
+        app pr $
+        lex filename src

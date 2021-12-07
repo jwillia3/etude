@@ -1,3 +1,4 @@
+
 let pr x = print x; print "\n"; x
 let dbg x = print "DEBUG: "; pr x
 let flip f x y = f y x
@@ -88,8 +89,3 @@ let rec itoa n =
     else
       do (n / 10) (chr (n rem 10 + ord '0') : out)
   in do n []
-
-
-
-# let _ = pr $ atoi "123"; exit 0
-let _ = pr $ itoa -123; exit 0

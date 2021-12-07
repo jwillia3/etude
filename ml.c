@@ -20,21 +20,6 @@ struct infix {char *id; int lhs, rhs; struct infix *next;};
 
 typedef const struct _ast ast;
 
-typedef struct value {
-    enum {BOOLE,CHAR,INT,STRING,TUPLE,LIST,REF,FN} type;
-    union {
-        int     i;
-        String  *s;
-        struct tuple *tup;
-        struct lst *lst;
-        struct fn { ast *e; struct values *vars;} *fn;
-        struct value *ref;
-    };
-} value;
-struct lst {value hd, tl;};
-struct tuple {int n; value xs[];};
-typedef struct values {value x; struct values *next;} values;
-
 enum token {
     TEOF,TINT,TCHAR,TSTRING,TLP,TRP,TLB,TRB,TCOMMA,TSEMI,TID,TEQUAL,
     TIF,TTHEN,TELSE,TCASE,TBAR,TARROW,TLET,TREC,TAND,TIN,TFN,
@@ -45,24 +30,36 @@ char *tokens[] = {
     "=","if","then","else","case","|","->","let","rec","and",
     "in","fn","true","false","!",0
 };
-enum op {
-    OISBOOL,OISINT,OISSTR,OISCONS,OISLIST,OISTUP,OISFN,
-    OSLEN,OCHR,OORD,OIMPL,OLEN,OTLEN,OHD,OTL,OREF,ODEREF,OPRINT,
-    OREADFILE,OEXIT,
-    OBINARY,
-    OEQ,ONE,OLT,OGT,OLE,OGE,OCONS,OCAT,OADD,OSUB,OMUL,ODIV,OREM,
-    OIDX,OTIDX,OCHARAT,OSET,
-    OTOTAL
+
+enum op { // Primitive operations.
+    OISBOOL,OISINT,OISSTR,OISCONS,OISLIST,OISTUP,OISFN,OSLEN,
+    OCHR,OORD,OIMPL,OLEN,OTLEN,OHD,OTL,OREF,ODEREF,OPRINT,
+    OREADFILE,OEXIT,OBINARY,OEQ,ONE,OLT,OGT,OLE,OGE,OCONS,OCAT,
+    OADD,OSUB,OMUL,ODIV,OREM,OIDX,OTIDX,OCHARAT,OSET,OTOTAL
 };
 char *ops[] = {
     "isbool","isint","isstring","iscons","islist","istuple",
-    "isfn","strlen","chr","ord","implode","length","tuplelength","hd",
-    "tl","ref","!","print","readfile","exit",
-    "",
-    "==","<>","<",">","<=",">=",":","^","+","-","*","/","rem",
-    "@","@*","char_at",":=",0
+    "isfn","strlen","chr","ord","implode","length",
+    "tuplelength","hd","tl","ref","!","print","readfile","exit",
+    "","==","<>","<",">","<=",">=",":","^","+","-","*","/",
+    "rem","@","@*","char_at",":=",0
 };
-value opvals[OTOTAL];
+
+typedef struct value {
+    enum {BOOLE,CHAR,INT,STRING,TUPLE,LIST,REF,FN} type;
+    union {
+        int             i;
+        String          *s;
+        struct tuple    *t;
+        struct list     *l;
+        struct fn {ast *e; struct values *vars;} *f;
+        struct value    *ref;
+    };
+} value;
+
+struct list {value hd, tl;};
+struct tuple {int n; value xs[];};
+typedef struct values {value x; struct values *next;} values;
 
 struct _ast {
     enum {
@@ -98,8 +95,9 @@ Pos             srcpos;
 struct infix    *infixes;
 struct part     *parts = 0;
 int             nparts = 0;
-const value     nil = {LIST, .lst=0};
-const value     unit = {TUPLE, .tup=&(struct tuple) {0}};
+value           opvals[OTOTAL];     // Function values for primitives.
+const value     nil = {LIST, .l=0};
+const value     unit = {TUPLE, .t=&(struct tuple) {0}};
 
 #define ast(f,p,...) new(struct _ast, .form=(f), .pos=(p), __VA_ARGS__)
 ast *expr();
@@ -110,11 +108,12 @@ String *newstring(char *txt, int n) {
     if (n < 0) n = strlen(txt);
 
     String *str = malloc(sizeof *str + n + 1);
-    memcpy(str->s, txt, n);
+    if (txt) memcpy(str->s, txt, n);
     str->s[n] = 0;
     str->n = n;
     return str;
 }
+
 String *intern(char *txt, int n) {
     if (n < 0) n = strlen(txt);
 
@@ -126,13 +125,8 @@ String *intern(char *txt, int n) {
     return interns[ninterns++] = newstring(txt, n);
 }
 
-/*
-
-    Value Manipulation Functions
-
-*/
-bool isnil(value x) { return x.type == LIST && !x.lst; }
-bool iscons(value x) { return x.type == LIST && x.lst; }
+bool isnil(value x) { return x.type == LIST && !x.l; }
+bool iscons(value x) { return x.type == LIST && x.l; }
 bool isbool(value x) { return x.type == BOOLE; }
 bool isint(value x) { return x.type == INT; }
 bool ischar(value x) { return x.type == CHAR; }
@@ -147,19 +141,18 @@ value character(int i) { return (value) {CHAR, .i=i}; }
 value string(String *s) { return (value) {STRING, .s=s}; }
 value ref(value x) { return (value) {REF, .ref=new(value[1], x)}; }
 value newtuple(int n) {
-    struct tuple *tup = malloc(sizeof *tup + n * sizeof *tup->xs);
-    tup->n = n;
-    return (value) {TUPLE, .tup=tup};
+    struct tuple *t = malloc(sizeof *t + n * sizeof *t->xs);
+    t->n = n;
+    return (value) {TUPLE, .t=t};
 }
 value cons(value hd, value tl) {
-    return (value) {LIST, .lst=new(struct lst, hd, tl)};
+    return (value) {LIST, .l=new(struct list, hd, tl)};
 }
 value fn(ast *e, values *vars) {
-    return (value) {FN, .fn=new(struct fn, e, vars)};
+    return (value) {FN, .f=new(struct fn, e, vars)};
 }
 value catenate(String *a, String *b) {
-    String *c = malloc(sizeof *c + a->n + b->n + 1);
-    c->n = a->n + b->n;
+    String *c = newstring(0, a->n + b->n);
     memcpy(c->s, a->s, a->n);
     memcpy(c->s + a->n, b->s, b->n);
     return string(c);
@@ -174,15 +167,15 @@ bool equal(value x, value y) {
     case INT:       return x.i == y.i;
     case STRING:    return x.s == y.s ||
                         x.s->n == y.s->n && !memcmp(x.s->s, y.s->s, x.s->n);
-    case TUPLE:     if (x.tup->n != y.tup->n) return false;
-                    for (int i = 0; i < x.tup->n; i++)
-                        if (!equal(x.tup->xs[i], y.tup->xs[i])) return false;
+    case TUPLE:     if (x.t->n != y.t->n) return false;
+                    for (int i = 0; i < x.t->n; i++)
+                        if (!equal(x.t->xs[i], y.t->xs[i])) return false;
                     return true;
-    case LIST:      for ( ; iscons(x) && iscons(y); x=x.lst->tl, y=y.lst->tl)
-                        if (!equal(x.lst->hd, y.lst->hd));
+    case LIST:      for ( ; iscons(x) && iscons(y); x=x.l->tl, y=y.l->tl)
+                        if (!equal(x.l->hd, y.l->hd));
                     return isnil(x) && isnil(y);
     case REF:       return equal(*x.ref, *y.ref);
-    case FN:        return x.fn == y.fn;
+    case FN:        return x.f == y.f;
     }
     return false;
 }
@@ -229,13 +222,13 @@ void printvalue(value x, bool decorate) {
                     } else pr("%s", x.s->s);
                     break;
     case TUPLE:     pr("(");
-                    for (int i = 0; i < x.tup->n; i++)
-                        pr("%s%v", i? ", ": "", x.tup->xs[i]);
+                    for (int i = 0; i < x.t->n; i++)
+                        pr("%s%v", i? ", ": "", x.t->xs[i]);
                     pr(")");
                     break;
     case LIST:      pr("[");
-                    for (value i = x; !isnil(i); i = i.lst->tl)
-                        pr("%v%s", i.lst->hd, isnil(i.lst->tl)? "": ", ");
+                    for (value i = x; !isnil(i); i = i.l->tl)
+                        pr("%v%s", i.l->hd, isnil(i.l->tl)? "": ", ");
                     pr("]");
                     break;
     case REF:       pr("(ref %v)", *x.ref); break;
@@ -352,12 +345,6 @@ bool peek(enum token t) { peeked = next(); return token == t; }
 bool want(enum token t) { peeked = next() != t; return !peeked; }
 void need(enum token t) { if (!want(t)) syntax("need %s", tokens[t]); }
 
-/*
-
-    Parsing Expressions
-
-*/
-
 ast *lit(Pos pos, value x) { return ast(ELIT, pos, .x=x); }
 ast *app(ast *f, ast *x) { return ast(EAPP, f->pos, .lhs=f, .rhs=x); }
 ast *binary(ast *lhs, enum op op, ast *rhs) {
@@ -385,16 +372,8 @@ ast *let(Pos pos, char *id, ast *x, ast *in) {
 ast *crash(ast *ctx, ast *offender) {
     return ast(ECRASH, ctx->pos, .ctx=ctx, .offender=offender);
 }
-bool istrivial(ast *e) {
-    switch (e->form) {
-    case ELIT: case EID: case ETUPLE: case ELIST: case EFN:
-        return true;
-    case EAPP: case EBIN: case EUN: case EIF: case ECASE:
-    case ELET: case ESEQ: case ECRASH:
-        return false;
-    }
-    return false;
-}
+
+bool istrivial(ast *e) { return e->form == ELIT || e->form == EID; }
 
 struct infix *findinfix() {
     if (peek(TID))
@@ -518,19 +497,6 @@ void readscript() {
     }
 }
 
-
-/*
-
-    Expression Transformation
-    - Check semantics (variables defined, form correct)
-    - Simplify expressions
-    - Index variables
-    - Avoid modifying existing ast; create new ones
-    - Only xform() should call itself after other functions
-      have been called to modify substructures
-
-*/
-
 varenv *find(char *id, varenv *vars, int *index) {
     *index = 0;
     for (varenv *i = vars; i; i = i->next, (*index)++)
@@ -611,13 +577,20 @@ ast *xform_cases(ast *x, struct rule *r, ast *no) {
     return r? xform_pat(r->lhs, x, r->rhs, xform_cases(x, r->next, no)): no;
 }
 
-ast *xform_defs(ast *ctx, struct rule *r, ast *yes) {
+ast *xform_defs(struct rule *r, ast *yes) {
     if (!r) return yes;
-    ast *no = crash(ctx, r->rhs);
-    if (!istrivial(r->rhs))
-        no = crash(ctx,
-                   lit(r->rhs->pos, string(intern("CANNOT_REIFY_VALUE", -1))));
-    return xform_pat(r->lhs, r->rhs, xform_defs(ctx, r->next, yes), no);
+
+    // If l.h.s. is a decomposition form, we need to save the value.
+    // If we didn't, each sub-test would recalculate r.h.s.
+    if (r->lhs->form != EID && !istrivial(r->rhs)) {
+        ast *var = uniquevar(r->rhs->pos);
+        ast *no = crash(r->lhs, var);
+        ast *cont = xform_defs(r->next, yes);
+        ast *body = xform_pat(r->lhs, var, cont, no);
+        return let(r->lhs->pos, var->id, r->rhs, body);
+    }
+    ast *no = crash(r->lhs, r->rhs);
+    return xform_pat(r->lhs, r->rhs, xform_defs(r->next, yes), no);
 }
 
 struct rule *copyrules(struct rule *r) {
@@ -733,10 +706,8 @@ ast *xform(ast *e, varenv *vars) {
                     }
                     // Break down multiple and/or pattern defs into singles.
                     // Reprocess once broken down.
-                    else {
-                        e = xform_defs(e, e->defs, e->in);
-                        return xform(e, vars);
-                    }
+                    else
+                        return xform(xform_defs(e->defs, e->in), vars);
 
     case ECRASH:    tmp = xform(e->offender, vars);
                     return ast(ECRASH, e->pos, .ctx=e->ctx, .offender=tmp);
@@ -776,26 +747,26 @@ value eval_op(ast *e, value x, value y) {
 
     case OIMPL:     if (!islist(x))
                         not_chars: semantic(e, "NOT_CHAR_LIST %v", x);
-                    for (n = 0, i = x; iscons(i); i = i.lst->tl)
-                        if (!ischar(i.lst->hd)) goto not_chars;
+                    for (n = 0, i = x; iscons(i); i = i.l->tl)
+                        if (!ischar(i.l->hd)) goto not_chars;
                         else n++;
                     buf = malloc(n + 1);
-                    for (n = 0, i = x; iscons(i); i = i.lst->tl)
-                        buf[n++] = i.lst->hd.i;
+                    for (n = 0, i = x; iscons(i); i = i.l->tl)
+                        buf[n++] = i.l->hd.i;
                     return string(newstring(buf, n));
 
     case OLEN:      if (!islist(x)) semantic(e, "NOT_LIST %v", x);
-                    for (n = 0; !isnil(x); x = x.lst->tl) n++;
+                    for (n = 0; !isnil(x); x = x.l->tl) n++;
                     return integer(n);
 
     case OTLEN:     if (!istuple(x)) semantic(e, "NOT_TUPLE %v", x);
-                    return integer(x.tup->n);
+                    return integer(x.t->n);
 
     case OHD:       if (!iscons(x)) semantic(e, "HD_NOT_LIST %v", x);
-                    return x.lst->hd;
+                    return x.l->hd;
 
     case OTL:       if (!iscons(x)) semantic(e, "TL_NOT_LIST %v", x);
-                    return x.lst->tl;
+                    return x.l->tl;
 
     case OREF:      return ref(x);
 
@@ -830,15 +801,15 @@ value eval_op(ast *e, value x, value y) {
     case OIDX:
         if (!islist(x)) semantic(e, "NON_LIST_BASE %v", x);
         if (!isint(y)) semantic(e, "NON_INTEGER_INDEX %v", y);
-        for (i = x, n = y.i; n-- > 0 && iscons(i); ) i = i.lst->tl;
+        for (i = x, n = y.i; n-- > 0 && iscons(i); ) i = i.l->tl;
         if (isnil(i)) semantic(e, "BOUNDS %v @ %v", x, y);
-        return i.lst->hd;
+        return i.l->hd;
 
     case OTIDX:
         if (!istuple(x)) semantic(e, "NON_TUPLE_BASE %v", x);
         if (!isint(y)) semantic(e, "NON_INTEGER_INDEX %v", y);
-        if (y.i < 0 || y.i >= x.tup->n) semantic(e, "BOUNDS %v @* %v", x, y);
-        return x.tup->xs[y.i];
+        if (y.i < 0 || y.i >= x.t->n) semantic(e, "BOUNDS %v @* %v", x, y);
+        return x.t->xs[y.i];
 
     case OCHARAT:
         if (!isstring(x)) semantic(e, "NON_STRING_BASE %v", x);
@@ -858,7 +829,7 @@ value eval_op(ast *e, value x, value y) {
     case OMUL: case ODIV: case OREM:
 
         if (!isint(x) || !isint(y))
-            semantic(e, "NON_INTEGER %v %s %v", x, y);
+            semantic(e, "NON_INTEGER %v %s %v", x, ops[e->op], y);
 
         switch (e->op) {
         case OLT:   return boole(x.i < y.i);
@@ -873,7 +844,6 @@ value eval_op(ast *e, value x, value y) {
         default:    return semantic(e, "UNEVALUATED_OP"), unit;
         }
 
-
     default:    return semantic(e, "UNEVALUATED_OP"), unit;
     }
 }
@@ -886,19 +856,20 @@ value eval(ast *e, values *vars) {
     case ELIT:      return e->x;
 
     case EID:       for (int i = e->index; i-- > 0 && vars; ) vars = vars->next;
-                    if (!vars || e->index<0) semantic(e, "MISTAKEN_INDEX %d", e->index);
+                    if (!vars || e->index<0)
+                        semantic(e, "MISTAKEN_INDEX %d", e->index);
                     return vars->x;
 
     case ETUPLE:    x = newtuple(e->n);
                     for (int i = 0; i < e->n; i++)
-                        x.tup->xs[i] = eval(e->es[i], vars);
+                        x.t->xs[i] = eval(e->es[i], vars);
                     return x;
 
     case ELIST:     x = nil;
                     ptr = &x;
                     for (int i = 0; i < e->n; i++) {
                         *ptr = cons(eval(e->es[i], vars), nil);
-                        ptr = &ptr->lst->tl;
+                        ptr = &ptr->l->tl;
                     }
                     return x;
 
@@ -907,8 +878,8 @@ value eval(ast *e, values *vars) {
     case EAPP:      x = eval(e->lhs, vars);
                     if (x.type != FN) semantic(e, "NON_FUNCTION %v", x);
                     y = eval(e->rhs, vars);
-                    vars = new(values, y, x.fn->vars);
-                    e = x.fn->e;
+                    vars = new(values, y, x.f->vars);
+                    e = x.f->e;
                     goto top;
 
     case EBIN:      x = eval(e->lhs, vars);
@@ -927,7 +898,7 @@ value eval(ast *e, values *vars) {
                         for (struct rule *i = e->defs; i; i = i->next)
                             vars = new(values, eval(i->rhs, vars), vars);
                         for (values *i = vars; i != bottom; i = i->next)
-                            i->x.fn->vars = vars;
+                            i->x.f->vars = vars;
                         e = e->in;
                         goto top;
                     } else {
