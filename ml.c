@@ -35,14 +35,14 @@ enum op { // Primitive operations.
     OISBOOL,OISINT,OISSTR,OISCONS,OISLIST,OISTUP,OISFN,OSLEN,
     OCHR,OORD,OIMPL,OLEN,OTLEN,OHD,OTL,OREF,ODEREF,OPRINT,
     OREADFILE,OEXIT,OBINARY,OEQ,ONE,OLT,OGT,OLE,OGE,OCONS,OCAT,
-    OADD,OSUB,OMUL,ODIV,OREM,OIDX,OTIDX,OCHARAT,OSET,OTOTAL
+    OADD,OSUB,OMUL,ODIV,OREM,OIDX,OTIDX,OCHARAT,OSET,OSEQ,OTOTAL
 };
 char *ops[] = {
     "isbool","isint","isstring","iscons","islist","istuple",
     "isfn","strlen","chr","ord","implode","length",
     "tuplelength","hd","tl","ref","!","print","readfile","exit",
     "","==","<>","<",">","<=",">=",":","^","+","-","*","/",
-    "rem","@","@*","char_at",":=",0
+    "rem","@","@*","char_at",":=",";",0
 };
 
 typedef struct value {
@@ -66,7 +66,7 @@ struct fn {ast *e; values *vars; struct finfo *info;};
 struct _ast {
     enum {
         ELIT,EID,ETUPLE,ELIST,EFN,EAPP,EBIN,EUN,EIF,ECASE,ELET,
-        ESEQ,ECRASH
+        ECRASH
     } form;
     Pos     pos;
     union {
@@ -207,7 +207,6 @@ void printexpr(ast *e) {
                         pr("%e=%e %s", i->lhs, i->rhs, i->next? "and ": "");
                     pr("in %e", e->in);
                     break;
-    case ESEQ:      pr("(%e; %e)", e->lhs, e->rhs); break;
     case ECRASH:    pr("(*CRASH*)"); break;
     }
 }
@@ -325,7 +324,9 @@ enum token next() {
         else src++;
 
     if (!*src) return token = 0;
-    for (int i = TLP; i <= TSEMI; i++)
+    if (*src == ';')
+        return src++, toktxt = intern(";", 1), token = TSEMI;
+    for (int i = TLP; i <= TCOMMA; i++)
         if (*src == tokens[i][0]) return src++, token = i;
     if (isdigit(src[*src == '-']))
         return tokint = strtol(src, &src, 10), token = TINT;
@@ -389,7 +390,7 @@ ast *crash(ast *ctx, ast *offender) {
 bool istrivial(ast *e) { return e->form == ELIT || e->form == EID; }
 
 struct infix *findinfix() {
-    if (peek(TID))
+    if (peek(TID) || peek(TSEMI))
         for (struct infix *i = infixes; i; i = i->next)
             if (i->id == toktxt->s) return i;
     return 0;
@@ -433,30 +434,6 @@ ast *aexpr(bool required) {
     return 0;
 }
 
-ast *iexpr(int level) {
-    if (level == 11) {
-        ast *lhs = aexpr(true);
-        ast *rhs;
-        while ((rhs = aexpr(false))) // Function application
-            lhs = app(lhs, rhs);
-        return lhs;
-    }
-
-    ast *lhs = iexpr(level + 1);
-    struct infix *op;
-    while ((op = findinfix()) && op->lhs == level) { // Binary operator
-        next();
-        ast *rhs = iexpr(op->rhs);
-        if (!strcmp(op->id, "&&"))
-            lhs = _if(lhs, rhs, lit(rhs->pos, boole(0)));
-        else if (!strcmp(op->id, "||"))
-            lhs = _if(lhs, lit(rhs->pos, boole(1)), rhs);
-        else
-            lhs = app(app(var(lhs->pos, op->id, -1), lhs), rhs);
-    }
-    return lhs;
-}
-
 struct rule *caserules() {
     if (!want(TBAR)) return 0;
     ast *lhs = expr();
@@ -472,32 +449,54 @@ struct rule *letdefs() {
     return new(struct rule, lhs, rhs, next);
 }
 
-ast *cexpr() {
-    Pos pos = (peek(0), srcpos);
-    if (want(TIF)) {
-        ast *cond = expr();
-        ast *yes = (need(TTHEN), expr());
-        ast *no = (need(TELSE), expr());
-        return _if(cond, yes, no);
+ast *cexpr(int level) {
+
+    if (level == 0) {
+        Pos pos = (peek(0), srcpos);
+
+        if (want(TIF)) {
+            ast *cond = expr();
+            ast *yes = (need(TTHEN), expr());
+            ast *no = (need(TELSE), expr());
+            return _if(cond, yes, no);
+        }
+        if (want(TCASE)) {
+            ast *sub = expr();
+            struct rule *rules = caserules();
+            return ast(ECASE, sub->pos, .sub=sub, .cases=rules);
+        }
+        if (want(TLET)) {
+            bool rec = want(TREC);
+            struct rule *defs = (want(TAND), letdefs());
+            ast *in = (need(TIN), expr());
+            return ast(ELET, pos, .rec=rec, .defs=defs, .in=in);
+        }
     }
-    if (want(TCASE)) {
-        ast *sub = expr();
-        struct rule *rules = caserules();
-        return ast(ECASE, sub->pos, .sub=sub, .cases=rules);
+
+    if (level == 11) {
+        ast *lhs = aexpr(true);
+        ast *rhs;
+        while ((rhs = aexpr(false))) // Function application
+            lhs = app(lhs, rhs);
+        return lhs;
     }
-    if (want(TLET)) {
-        bool rec = want(TREC);
-        struct rule *defs = (want(TAND), letdefs());
-        ast *in = (need(TIN), expr());
-        return ast(ELET, pos, .rec=rec, .defs=defs, .in=in);
+
+    ast *lhs = cexpr(level + 1);
+    struct infix *op;
+    while ((op = findinfix()) && op->lhs == level) { // Binary operator
+        next();
+        ast *rhs = cexpr(op->rhs);
+        if (!strcmp(op->id, "&&"))
+            lhs = _if(lhs, rhs, lit(rhs->pos, boole(0)));
+        else if (!strcmp(op->id, "||"))
+            lhs = _if(lhs, lit(rhs->pos, boole(1)), rhs);
+        else
+            lhs = app(app(var(lhs->pos, op->id, -1), lhs), rhs);
     }
-    return iexpr(0);
+    return lhs;
 }
 
-ast *expr() {
-    ast *e = cexpr();
-    return want(TSEMI)? ast(ESEQ, e->pos, .lhs=e, .rhs=expr()): e;
-}
+ast *expr() { return cexpr(0); }
 
 void readscript() {
     while (!peek(TEOF)) {
@@ -658,10 +657,6 @@ ast *xform(ast *e, varenv *vars) {
                     }
 
     case EUN:       return ast(EUN, e->pos, .op=e->op, .rhs=xform(e->rhs, vars));
-
-    case ESEQ:      x = xform(e->lhs, vars);
-                    y = xform(e->rhs, vars);
-                    return ast(ESEQ, e->pos, .lhs=x, .rhs=y);
 
     case EBIN:      x = xform(e->lhs, vars);
                     y = xform(e->rhs, vars);
@@ -898,7 +893,12 @@ value eval(ast *e, values *vars) {
                     e = x.f->e;
                     goto top;
 
-    case EBIN:      x = eval(e->lhs, vars);
+    case EBIN:      if (e->op == OSEQ) {
+                        eval(e->lhs, vars);
+                        e = e->rhs;
+                        goto top;
+                    }
+                    x = eval(e->lhs, vars);
                     y = eval(e->rhs, vars);
                     return eval_op(e, x, y);
 
@@ -928,10 +928,6 @@ value eval(ast *e, values *vars) {
     case ECRASH:    x = eval(e->offender, vars);
                     semantic(e->ctx, "NO_MATCH: %v", x);
                     return unit;
-
-    case ESEQ:      eval(e->lhs, vars);
-                    e = e->rhs;
-                    goto top;
 
     case ECASE:     // does not exist
     default:        return semantic(e, "UNEVALUATED (%d)", e->form), unit;
@@ -964,13 +960,14 @@ int main(int argc, char **argv) {
     addinfix(9, 9, (char*[]){".",0});
     addinfix(7, 8, (char*[]){"*","/","rem",0});
     addinfix(6, 7, (char*[]){"+","-",0});
+    addinfix(6, 6, (char*[]){"^",0});
     addinfix(5, 6, (char*[]){"@",0});
-    addinfix(5, 5, (char*[]){":","^",0});
+    addinfix(5, 5, (char*[]){":",0});
     addinfix(4, 5, (char*[]){"==","<>","<",">","<=",">=",0});
     addinfix(3, 3, (char*[]){"&&",0});
     addinfix(2, 2, (char*[]){"||",0});
-    addinfix(1, 1, (char*[]){":=",0});
-    addinfix(0, 0, (char*[]){"$",0});
+    addinfix(1, 1, (char*[]){":=","$",0});
+    addinfix(0, 0, (char*[]){";",0});
 
     for (argv++; *argv; argv++) {
         nparts = 0;

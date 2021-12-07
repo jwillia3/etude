@@ -9,8 +9,7 @@ decls:  decls "and" decls                       # Multiple definitions
 expr:   'if' expr 'then' expr 'else' expr       # Conditional
         'case' expr ('|' expr '->' expr)...     # Case analysis
         'let' ['rec'] decls 'in' expr           # Local definition
-        iexpr [";" expr]                        # Sequence
-iexpr:  iexpr id iexpr                          # Operator application
+        expr id expr                            # Operator application
         {aexpr} aexpr                           # Function application
 aexpr:  int / char / string / true / false      # Constant
         id                                      # Variable reference
@@ -21,6 +20,21 @@ aexpr:  int / char / string / true / false      # Constant
 
 id:     [a-zA-Z0-9_']+ | [!$%&*+-./:<=>?@^|~]+
 ```
+
+== Operators
+ lvl | Left             | Right
+-----+------------------+---------------
+  9  |                  | .
+  8  |                  |
+  7  | * / rem          |
+  6  | + -              | ^
+  5  | @                |
+  4  | == <> < > <= >=  |
+  3  |                  | &&
+  2  |                  | orelse
+  1  |                  | := $=
+  0  |                  | ;
+
 Strings are double-quoted. Escape sequences are introduced by backslash (\\).
 \n \t \" and \' \\ have their conventional meaning.
 
