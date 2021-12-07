@@ -588,6 +588,7 @@ ast *xform_pat(ast *e, ast *x, ast *yes, ast *no) {
 }
 
 ast *xform_cases(ast *x, struct rule *r, ast *no) {
+    // x is the subject of the case, which is always a variable
     return r? xform_pat(r->lhs, x, r->rhs, xform_cases(x, r->next, no)): no;
 }
 
@@ -724,7 +725,7 @@ ast *xform(ast *e, varenv *vars) {
                     else
                         return xform(xform_defs(e->defs, e->in), vars);
 
-    case ECRASH:    tmp = xform(e->offender, vars);
+    case ECRASH:    tmp = xform(e->offender, vars); // Index offender var
                     return ast(ECRASH, e->pos, .ctx=e->ctx, .offender=tmp);
 
     default:        return semantic(e, "UNTRANSFORMED");

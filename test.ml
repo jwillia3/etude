@@ -1,5 +1,3 @@
-# let source = readfile "prelude.ml"
-
 let lex filename src =
   # Return the first index that ok is not ture
   let rec while ok i =
@@ -9,12 +7,7 @@ let lex filename src =
       i
   in
 
-  let err index msg =
-    print "ml: error ";
-    print msg;
-    print ".\n";
-    exit 1
-  in
+  let err index msg = print ("ml: error " ^ msg ^ ".\n"); exit 1 in
 
   let idchr c = isalnum c || c == '_' || c == '\'' in
   let opchr c = char_in "!$%&*+-./:<=>?@^|~" c in
@@ -107,4 +100,3 @@ let filename = "prelude.ml"
 let src = readfile filename
 let tokens = lex filename src
 let _ = app pr tokens
-
