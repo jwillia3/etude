@@ -4,32 +4,34 @@ let dbg x = print "DEBUG: "; pr x
 let flip f x y = f y x
 let . f g x = f (g x)
 let $ f x = f x
+let not x = if x then false else true
 
-let not true = false
-|   not false = true
-
-let rec foldl f prev (x:xs) = foldl f (f prev x) xs
-|       foldl _ prev []     = prev
+let rec foldl f x xs = case xs
+                       | x':xs' -> foldl f (f x x') xs'
+                       | []     -> x
 
 let reverse xs = foldl (flip (:)) [] xs
 
-let rec foldr f rightmost xs = foldl (flip f) rightmost (reverse xs)
+let rec foldr f x xs = foldl (flip f) x (reverse xs)
 
 let concat xs ys = foldr (:) ys xs
 let append x xs = concat xs [x]
-let flatten lists = foldr (concat) [] lists
+let flatten xss = foldr (concat) [] xss
 
 let map f xs = foldr ((:) . f) [] xs
 let flatmap f xs = flatten (map f xs)
 
-let rec app f (x:xs) = f x; app f xs
-|       app _ []     = ()
+let rec app f xs = case xs
+                   | x:xs -> f x; app f xs
+                   | []   -> ()
 
-let rec find ok (x:xs) =  if ok then [x] else find ok xs
-|       find _  []     =  []
+let rec find ok xs = case xs
+                     | x:xs -> if ok x then [x] else find ok xs
+                     | []   -> []
 
-let rec exists ok (x:xs) = ok x || exists ok xs
-|       exists _  []     = false
+let rec exists ok xs = case xs
+                       | x:xs -> ok x || exists ok xs
+                       | []   -> false
 
 let join strings = foldr (^) "" strings
 

@@ -61,16 +61,13 @@ Transformations
     static value. I.e. all instances of (+) refer to the same
     fn value. When partially applied, it will generate a new
     specialised fn
-- Functions are broken down to one-clause, one-var-param defs
-  - If all params are variables and there's only one clause,
-    just curry the params
-  - If there are many clauses or if any parameter is not a var,
-    convert the clauses into a case expression
-  - Create new vars for each param, these are the new fn params
-  - Join all of the new vars into a tuple as the subject of a
-    case expression that will become the body
-  - The rules of the case expression are the original rules
-  - Curry the params
+- Functions are broken down to one-variable definitions
+  - Multiple parameters are broken down one-by-one
+  - If a param is a pattern, a named param is created to hold
+    its value and it is broken into a decision tree.
+  - The true branch should be the body of the function
+  - The false branch should be a crash pointing to the source
+    of the l.h.s. and printing the param variable
 - Case expressions are broken down
   - If the subject is not a variable, make a variable for it
     since its value will be referred to many times in the

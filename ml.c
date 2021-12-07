@@ -396,63 +396,12 @@ struct infix *findinfix() {
     return 0;
 }
 
-ast *curry(char *id, int nparams, ast **params, ast *body) {
-    for (int i = nparams; i-- > 0; ) {
-        struct finfo *info = new(struct finfo, .id=id, .got=i);
-        body = ast(EFN, params[i]->pos, .lhs=params[i], .rhs=body, .info=info);
-    }
-    return body;
-}
-
-ast *fnexpr(enum token separator, char *id) {
-    struct rule *cases = 0;
-    struct rule **casesp = &cases;
-    int         nparams = 0;
-    int         ncases = 0;
-    ast         **canon;
-    bool        allvars = true;
-
-    do {
-        Pos pos = srcpos;
-        int np = 0;
-        ast **ps = 0;
-        ast *p;
-
-        while ((p = aexpr(false))) {
-            ps = realloc(ps, ++np * sizeof *ps);
-            ps[np - 1] = p;
-            allvars &= (p->form == EID);
-        }
-
-        if (ncases == 0)
-            nparams = np;
-        else if (nparams != np)
-            syntax("wrong number of params %d/%d", np, nparams);
-        ncases++;
-
-        ast *lhs = ast(ETUPLE, pos, .n=np, .es=ps);
-        ast *rhs = (need(separator), expr());
-
-        *casesp = new(struct rule, lhs, rhs, 0);
-        casesp = &(*casesp)->next;
-
-        // Simple variable definition.
-        if (nparams == 0) return rhs;
-
-    } while (want(TBAR) && (!id || (need(TID), toktxt->s == id)));
-
-    // If only one case and all are variables, just curry functions.
-    if (allvars && ncases == 1)
-        return curry(id, nparams, cases->lhs->es, cases->rhs);
-
-    // Create canonical variables
-    canon = malloc(nparams * sizeof *canon);
-    for (int i = 0; i < nparams; i++)
-        canon[i] = uniquevar(cases->lhs->es[i]->pos);
-
-    ast *sub = ast(ETUPLE, canon[0]->pos, .n=nparams, .es=canon);
-    ast *body = ast(ECASE, canon[0]->pos, .sub=sub, .cases=cases);
-    return curry(id, nparams, sub->es, body);
+ast *funexpr(enum token separator, char *id, int got) {
+    if (want(separator)) return expr();
+    ast *lhs = aexpr(true);
+    ast *rhs = funexpr(separator, id, got + 1);
+    struct finfo *info = new(struct finfo, .id=id, .got=got);
+    return ast(EFN, lhs->pos, .lhs=lhs, .rhs=rhs, .info=info);
 }
 
 ast *aexpr(bool required) {
@@ -475,9 +424,12 @@ ast *aexpr(bool required) {
             es[n++] = expr();
         } while (want(TCOMMA));
         need(end);
+
+        if (n == 0) return lit(pos, end == TRP? unit: nil);
+        if (end == TRP && n == 1) return es[0];
         return ast(end == TRP? ETUPLE: ELIST, pos, .n=n, .es=es);
     }
-    if (want(TFN)) return fnexpr(TARROW, 0);
+    if (want(TFN)) return funexpr(TARROW, 0, 0);
     if (required) syntax("need expression");
     return 0;
 }
@@ -492,7 +444,7 @@ struct rule *caserules() {
 
 struct rule *letdefs() {
     ast *lhs = aexpr(true);
-    ast *rhs = fnexpr(TEQUAL, lhs->form == EID? lhs->id: 0);
+    ast *rhs = funexpr(TEQUAL, lhs->form == EID? lhs->id: 0, 0);
     struct rule *next = want(TAND)? letdefs(): 0;
     return new(struct rule, lhs, rhs, next);
 }
@@ -599,12 +551,7 @@ ast *xform_pat(ast *e, ast *x, ast *yes, ast *no) {
                              ? yes
                              : let(e->pos, e->id, x, yes);
 
-    case ETUPLE:    if (e->n == 0)
-                        return xform_pat(lit(e->pos, unit), x, yes, no);
-                    if (e->n == 1)
-                        return xform_pat(e->es[0], x, yes, no);
-
-                    for (int i = e->n; i-- > 0; ) {
+    case ETUPLE:    for (int i = e->n; i-- > 0; ) {
                         ast *ie = binary(x, OTIDX, lit(x->pos, integer(i)));
                         yes = xform_pat(e->es[i], ie, yes, no);
                     }
@@ -614,10 +561,7 @@ ast *xform_pat(ast *e, ast *x, ast *yes, ast *no) {
                     yes = _if(tmp, yes, no);
                     return _if(unary(OISTUP, x), yes, no);
 
-    case ELIST:    if (e->n == 0)
-                        return xform_pat(lit(e->pos, nil), x, yes, no);
-
-                    for (int i = e->n; i-- > 0; ) {
+    case ELIST:    for (int i = e->n; i-- > 0; ) {
                         ast *ie = binary(x, OIDX, lit(x->pos, integer(i)));
                         yes = xform_pat(e->es[i], ie, yes, no);
                     }
@@ -690,22 +634,27 @@ ast *xform(ast *e, varenv *vars) {
                     // Otherwise, the variable is undefined.
                     return semantic(e, "undefined symbol");
 
-    case ETUPLE:    if (e->n == 0) return xform(lit(e->pos, unit), vars);
-                    if (e->n == 1) return xform(e->es[0], vars);
-                    es = malloc(e->n * sizeof *es);
+    case ETUPLE:
+    case ELIST:     es = (void*) malloc(e->n * sizeof *es);
                     for (int i = 0; i < e->n; i++)
                         es[i] = xform(e->es[i], vars);
-                    return ast(ETUPLE, e->pos, .n=e->n, .es=es);
+                    return ast(e->form, e->pos, .n=e->n, .es=es);
 
-    case ELIST:     if (e->n == 0) return xform(lit(e->pos, nil), vars);
-                    es = malloc(e->n * sizeof *es);
-                    for (int i = 0; i < e->n; i++)
-                        es[i] = xform(e->es[i], vars);
-                    return ast(ELIST, e->pos, .n=e->n, .es=es);
+    case EFN:       // Simple one-variable function.
+                    // Check r.h.s. with parameter added to variables.
+                    if (e->lhs->form == EID) {
+                        tmp = xform(e->rhs, new(varenv, e->lhs->id, vars));
+                        return ast(EFN, e->pos, .lhs=e->lhs,
+                                   .rhs=tmp, .info=e->info);
+                    }
 
-    case EFN:       // All variables are one-clause, one-var param
-                    tmp = xform(e->rhs, new(varenv, e->lhs->id, vars));
-                    return ast(EFN, e->pos, .lhs=e->lhs, .rhs=tmp, .info=e->info);
+                    // Otherwise, introduce named parameter and xform pattern.
+                    else {
+                        ast *uid = uniquevar(e->lhs->pos);
+                        ast *body = xform_pat(e->lhs, uid, e->rhs, crash(e, uid));
+                        e = ast(EFN, e->pos, .lhs=uid, .rhs=body, .info=e->info);
+                        return xform(e, vars);
+                    }
 
     case EUN:       return ast(EUN, e->pos, .op=e->op, .rhs=xform(e->rhs, vars));
 
@@ -726,15 +675,14 @@ ast *xform(ast *e, varenv *vars) {
                     y = xform(e->no, vars);
                     return _if(tmp, x, y);
 
-    case ECASE:     tmp = xform(e->sub, vars);
-                    if (tmp->form == EID) {
-                        x = xform_cases(tmp, e->cases, crash(e, tmp));
+    case ECASE:     if (e->sub->form == EID) {
+                        x = xform_cases(e->sub, e->cases, crash(e, e->sub));
                         return xform(x, vars);
                     } else {
                         // Create a temporary to hold the subject value.
-                        ast *sub = uniquevar(tmp->pos);
+                        ast *sub = uniquevar(e->sub->pos);
                         ast *in = xform_cases(sub, e->cases, crash(e, sub));
-                        ast *out = let(sub->pos, sub->id, tmp, in);
+                        ast *out = let(sub->pos, sub->id, e->sub, in);
                         return xform(out, vars);
                     }
 
